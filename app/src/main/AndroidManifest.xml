@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Shizuku 提权：允许本应用在用户授权后通过 Shizuku 以更高权限运行 shell，
+         以便读取 Minecraft 沙箱外的存档（基岩版 /Android/data/ 目录）。 -->
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+    <!-- Blockbench 在线网页版加载需要网络 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 读取系统连通性。WebView 的 navigator.onLine 由底层 ConnectivityManager 推导，
+         缺少本权限时可能恒定误报为 false，会连带影响 Blockbench 商店列表的填充
+         与内置插件加载时的网络探测；同时本应用展示联网状态也需要它。 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 把 Blockbench 导出的模型写入公共“下载”目录。Android 10+ 走 MediaStore 不需要权限，
+         仅 Android 8/9 需要它；未授权时导出会退回应用私有目录，文件不会丢。 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <application
+        android:name=".MinewaysApp"
+        android:label="Mineways Mobile"
+        android:theme="@style/Theme.MinewaysMobile"
+        android:hardwareAccelerated="true"
+        android:largeHeap="true"
+        android:extractNativeLibs="false"
+        tools:targetApi="s">
+
+        <!-- Shizuku 服务提供者（用于检测/连接 Shizuku） -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Blockbench 模型编辑器（在线 / 离线 WebView 页） -->
+        <activity
+            android:name=".BlockbenchActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|uiMode|keyboard|keyboardHidden"
+            android:theme="@style/Theme.MinewaysMobile" />
+
+        <!-- OBJ 自动贴图预览（全屏 WebView + 内置离线 WebGL 查看器 assets/objviewer） -->
+        <activity
+            android:name=".ObjPreviewActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|uiMode|keyboard|keyboardHidden"
+            android:theme="@style/Theme.MinewaysMobile" />
+
+        <!-- 内置小游戏《寂零快跑》（assets/minigame 下的纯静态 HTML5 跑酷，竖屏触屏操作） -->
+        <activity
+            android:name=".MiniGameActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|uiMode|keyboard|keyboardHidden"
+            android:theme="@style/Theme.MinewaysMobile" />
+
+        <!-- FileProvider：供“快捷工具”等访问并打开导出/转换输出目录 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

@@ -1,0 +1,38 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0d1117;
+  overscroll-behavior: none;
+}
+
+#game-wrap {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 与游戏天空同色：即使画布边缘有一像素误差也不会露出异色缝 */
+  background: #3b9cec;
+}
+
+canvas#game {
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
+}
+
+#loading {
+  position: absolute;
+  color: #b9d4ea;
+  font: 15px/1.8 "Microsoft YaHei", "PingFang SC", sans-serif;
+  letter-spacing: 2px;
+  pointer-events: none;
+}

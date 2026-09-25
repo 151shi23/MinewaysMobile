@@ -1,0 +1,34 @@
+{
+	"new_version": {
+		"color": "var(--color-bright_ui)",
+		"text_color": "var(--color-accent_text)",
+		"layout": "vertical",
+		"insert_after": "splash_screen",
+		"text": [
+			{"text": "Welcome to Blockbench 5.2", "type": "h1"},
+			{"text": "Check out the [full changelog](https://github.com/JannisX11/blockbench/releases/tag/v5.2.0) - or watch the [update video](https://youtu.be/9MET5-wH5uw)!"}
+		],
+		"features": [
+			{
+				"image": "https://web.blockbench.net/content/reference_images.png",
+				"title": "3D Reference Images",
+				"text": "Position your reference image as a 3D plane anywhere in your scene!\n\nAlso new: Playback controls for video references, locked references in the 2D image editor, and moveable reference models!"
+			},
+			{
+				"image": "https://web.blockbench.net/content/screen_space_brush.png",
+				"title": "Screen-Space Brush",
+				"text": "Paint from the angle of your view across any edges and elements!"
+			},
+			{
+				"image": "https://web.blockbench.net/content/layer_groups.png",
+				"title": "Layer Groups",
+				"text": "Organize your texture layers with the new layer groups!"
+			},
+			{
+				"image": "https://web.blockbench.net/content/ik_pole.png",
+				"title": "Inverse Kinematics",
+				"text": "IK is now better than ever! Pole vectors give you control over bend directions, armatures are fully supported, and it's faster and smoother!"
+			}
+		]
+	}
+}

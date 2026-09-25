@@ -1,0 +1,6834 @@
+/*
+  mw_loadblock.cpp —— 从 MinewaysMap.cpp 逐字抽取的真实读档核心。
+  内容：LoadBlock / determineMaxFilledHeight / createBlockFromSchematic /
+        testBlock / testNumeral（后两者用于合成测试世界；屏幕绘制调用 shim 于 android_port.cpp）。
+  规则：函数体逐字保留原样，仅拆出 3D 地图 GUI 的纯屏幕绘制调用。
+*/
+#include "stdafx.h"
+#include <stdlib.h>
+#include <cassert>
+
+// 并行于 MinewaysMap.cpp 的静态全局（仅供本 TU 用，避免跨单元链接污染）
+static int gUnknownBlock = 0;
+static int gPerformUnknownBlockCheck = 1;
+static char gUnknownBlockName[MAX_PATH_AND_FILE];
+static int gUnknownBlockID = 7;
+
+// MinewaysMap.cpp 的 TU 内局部宏（原样）
+#define BLOCK_INDEX(x,topy,z) (  ((topy)*256)+ \
+    ((z)*16) + \
+    (x)  )
+
+// 以下取自 MinewaysMap.cpp（逐字）：分隔符与维度目录构建，ObjFileManip 导出依赖
+// static wchar_t gSeparator[3];
+// SetSeparatorMap 在桌面由 GUI 设置路径分隔符；安卓固定用 '/'（见 setFromJni）
+static wchar_t gSeparator[3];
+
+void SetSeparatorMap(const wchar_t* separator)
+{
+    wcscpy_s(gSeparator, 3, separator);
+}
+
+// Builds the dimension-specific directory path into pWorldGuide->directory.
+// Uses the newFormat flag to determine old (DIM-1/DIM1) vs new (dimensions/minecraft/...) layout.
+void SetDimensionDirectory(WorldGuide* pWorldGuide, unsigned int worldType)
+{
+    wcsncpy_s(pWorldGuide->directory, MAX_PATH_AND_FILE, pWorldGuide->world, MAX_PATH_AND_FILE - 1);
+    wcscat_s(pWorldGuide->directory, MAX_PATH_AND_FILE, gSeparator);
+
+    if (pWorldGuide->newFormat) {
+        // New format (snapshot 25w02a+): dimensions/minecraft/{overworld,the_nether,the_end}/
+        if (worldType & HELL)
+            wcscat_s(pWorldGuide->directory, MAX_PATH_AND_FILE, L"dimensions/minecraft/the_nether/");
+        else if (worldType & ENDER)
+            wcscat_s(pWorldGuide->directory, MAX_PATH_AND_FILE, L"dimensions/minecraft/the_end/");
+        else
+            wcscat_s(pWorldGuide->directory, MAX_PATH_AND_FILE, L"dimensions/minecraft/overworld/");
+    }
+    else {
+        // Old format: DIM-1/ or DIM1/ (overworld has no prefix)
+        if (worldType & HELL)
+            wcscat_s(pWorldGuide->directory, MAX_PATH_AND_FILE, L"DIM-1/");
+        else if (worldType & ENDER)
+            wcscat_s(pWorldGuide->directory, MAX_PATH_AND_FILE, L"DIM1/");
+    }
+}
+
+static WorldBlock* determineMaxFilledHeight(WorldBlock* block);
+static int createBlockFromSchematic(WorldGuide* pWorldGuide, int cx, int cz, WorldBlock* block);
+void addDiagonalBlocksToMap(int maxCount, int y, int type, int dataVal, int finalDataVal, int typeHighBit, WorldBlock* block)
+{
+    int neighborIndex;
+    if (dataVal + 16 < maxCount)
+    {
+        neighborIndex = BLOCK_INDEX(5 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+        block->grid[neighborIndex] = (unsigned char)type;
+        block->data[neighborIndex] = (unsigned short)((finalDataVal + 16) | typeHighBit);
+
+        if (dataVal + 32 < maxCount) {
+            neighborIndex = BLOCK_INDEX(6 + (type % 2) * 8, y, 6 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned short)((finalDataVal + 32) | typeHighBit);
+
+            if (dataVal + 48 < maxCount) {
+                neighborIndex = BLOCK_INDEX(7 + (type % 2) * 8, y, 7 + (dataVal % 2) * 8);
+                block->grid[neighborIndex] = (unsigned char)type;
+                block->data[neighborIndex] = (unsigned short)((finalDataVal + 48) | typeHighBit);
+            }
+        }
+    }
+}
+void testBlock(WorldBlock* block, int origType, int y, int dataVal)
+{
+    int bi = 0;
+    int trimVal, trimAndMtlVal;
+    int addBlock = 0;
+
+    assert(dataVal < 16);
+    int finalDataVal = dataVal;
+
+    int type = origType;
+    int typeHighBit = 0x0;
+    if (origType > 255) {
+        // how we signal a block type is > 255: fold its high bits into data's top nibble
+        // (bits 12-15) - see BLOCK_TYPE_FROM_GRID_DATA/PACK_TYPE_EXT_AND_DATAVAL in nbt.h.
+        //finalDataVal |= typeHighBit; - now done at end
+        type &= 0xFF;
+        typeHighBit = ((origType >> 8) & 0xF) << 12;
+    }
+
+    int neighborIndex;
+
+    switch (origType)
+    {
+    default:
+        // uses just 0 (first block) - no data field
+        if (dataVal == 0)
+        {
+            //block->grid[BLOCK_INDEX(4+(type%2)*8,y,4+(dataVal%2)*8)] = (unsigned char)type;
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_SAND:
+    case BLOCK_TNT:
+    case BLOCK_WOODEN_PRESSURE_PLATE:
+    case BLOCK_WEIGHTED_PRESSURE_PLATE_LIGHT:
+    case BLOCK_WEIGHTED_PRESSURE_PLATE_HEAVY:
+    case BLOCK_SPONGE:
+    case BLOCK_SOUL_SAND:
+    case BLOCK_GLOWSTONE:
+    case BLOCK_NETHER_WART_BLOCK:
+    case BLOCK_GLASS:
+    case BLOCK_CAVE_VINES:
+    case BLOCK_CAVE_VINES_LIT:
+    case BLOCK_AZALEA:
+    case BLOCK_CRYING_OBSIDIAN:
+        // uses 0-1 
+        if (dataVal < 2)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_PALE_HANGING_MOSS:
+        // uses 0-1, add stone above
+        if (dataVal < 2)
+        {
+            // put stone overhead
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_TORCHFLOWER_CROP:
+        // uses 0-1, put on farmland
+        if (dataVal < 2)
+        {
+            addBlock = 1;
+            // add farmland underneath
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y - 1, 4 + (dataVal % 2) * 8)] = BLOCK_FARMLAND;
+        }
+        break;
+    case BLOCK_FIRE:
+        // uses 0-1, with 1 meaning bit 16
+        if (dataVal < 2)
+        {
+            addBlock = 1;
+            if (dataVal == 1) {
+                // soul fire
+                finalDataVal = BIT_16;
+            }
+            // add netherrack underneath
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y - 1, 4 + (dataVal % 2) * 8)] = BLOCK_NETHERRACK;
+        }
+        break;
+    case BLOCK_SUGAR_CANE:
+        // uses 0-1, with 1 meaning stack it higher
+        if (dataVal < 2)
+        {
+            addBlock = 1;
+            if (dataVal == 1) {
+                // higher
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = BLOCK_SUGAR_CANE;
+            }
+            // add stationary water, below, so that sugar cane will survive .schem export
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y - 1, 5 + (dataVal % 2) * 8)] = BLOCK_STATIONARY_WATER;
+        }
+        break;
+    case BLOCK_SCULK_SENSOR:
+        // uses 0-4 and 8-12, 0 is the sculk, 1-4 calibrated rotated, 8 bit activated
+        switch (dataVal & 0x7)
+        {
+        case 0:
+            // sculk_sensor, fine as-is
+            addBlock = 1;
+            break;
+        case 1:
+        case 2:
+        case 3:
+        case 4:
+            // calibrated, four rotations
+            finalDataVal = 0x4 | ((dataVal & 0x7) - 1);
+            addBlock = 1;
+            break;
+        }
+        if (dataVal > 7) {
+            // add sculk_sensor_phase on
+            finalDataVal |= BIT_16;
+        }
+        break;
+    case BLOCK_SPORE_BLOSSOM:
+        if (dataVal < 1) {
+            addBlock = 1;
+            // put stone overhead
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+        }
+        break;
+
+    case BLOCK_GRASS_BLOCK:
+        // uses 0,8 - snowy
+        if ((dataVal & 0x7) == 0)
+        {
+            addBlock = 1;
+        }
+        break;
+
+    case BLOCK_SANDSTONE:
+    case BLOCK_RED_SANDSTONE:
+    case BLOCK_PRISMARINE:
+    case BLOCK_NETHER_BRICKS:
+    case BLOCK_RED_MUSHROOM:
+    case BLOCK_MANGROVE_LEAVES:
+        // uses 0-2
+        if (dataVal < 3)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_NETHER_WART:
+    case BLOCK_STONE_BRICKS:
+    case BLOCK_FROSTED_ICE:
+    case BLOCK_GLAZED_TERRACOTTA:
+    case BLOCK_GLAZED_TERRACOTTA + 1:
+    case BLOCK_GLAZED_TERRACOTTA + 2:
+    case BLOCK_GLAZED_TERRACOTTA + 3:
+    case BLOCK_GLAZED_TERRACOTTA + 4:
+    case BLOCK_GLAZED_TERRACOTTA + 5:
+    case BLOCK_GLAZED_TERRACOTTA + 6:
+    case BLOCK_GLAZED_TERRACOTTA + 7:
+    case BLOCK_GLAZED_TERRACOTTA + 8:
+    case BLOCK_GLAZED_TERRACOTTA + 9:
+    case BLOCK_GLAZED_TERRACOTTA + 10:
+    case BLOCK_GLAZED_TERRACOTTA + 11:
+    case BLOCK_GLAZED_TERRACOTTA + 12:
+    case BLOCK_GLAZED_TERRACOTTA + 13:
+    case BLOCK_GLAZED_TERRACOTTA + 14:
+    case BLOCK_GLAZED_TERRACOTTA + 15:
+    case BLOCK_SMOOTH_STONE:
+    case BLOCK_SWEET_BERRY_BUSH:
+    case BLOCK_STONECUTTER:
+    case BLOCK_LECTERN:
+    case BLOCK_LEAVES:
+    case BLOCK_AD_LEAVES:
+    case BLOCK_TEST_BLOCK:
+        // uses 0-3
+        if (dataVal < 4)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_STRUCTURE_BLOCK:
+        // uses 1-4
+        if (dataVal > 0 && dataVal < 5)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_BEETROOT_SEEDS:
+        // uses 0-3, put farmland beneath it
+        if (dataVal < 4)
+        {
+            addBlock = 1;
+            // add farmland underneath
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y - 1, 4 + (dataVal % 2) * 8)] = BLOCK_FARMLAND;
+        }
+        break;
+    case BLOCK_CRAFTING_TABLE:
+    case BLOCK_CORAL_BLOCK:
+    case BLOCK_DEAD_CORAL_BLOCK:
+    case BLOCK_POTENT_SULFUR:
+        // uses 0-4
+        if (dataVal < 5)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_PUMPKIN:
+    case BLOCK_JACK_O_LANTERN:
+    case BLOCK_RESPAWN_ANCHOR:
+    case BLOCK_DANDELION:
+        // uses 0-5
+        if (dataVal < 6)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_PITCHER_CROP:
+        // uses 0-4
+        if (dataVal < 5)
+        {
+            addBlock = 1;
+            // add farmland underneath
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y - 1, 4 + (dataVal % 2) * 8)] = BLOCK_FARMLAND;
+            // if age is 3 or 4, add block above of same flower
+            if (dataVal > 2) {
+                bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+                block->grid[bi] = (unsigned char)type;
+                block->data[bi] = (unsigned short)(dataVal | 0x8 | typeHighBit); // 0x8 means half is upper
+            }
+        }
+        break;
+    case BLOCK_CORAL:
+    case BLOCK_CORAL_FAN:
+    case BLOCK_DEAD_CORAL_FAN:
+    case BLOCK_DEAD_CORAL:
+        // uses 0-9
+        if (dataVal < 10)
+        {
+            addBlock = 1;
+            if (dataVal >= 5) {
+                finalDataVal = (dataVal - 5) | WATERLOGGED_BIT;	// waterlogged
+            }
+        }
+        break;
+    case BLOCK_DIRT:
+        // uses 0-5, 10 for podzol with snow
+        if (dataVal < 6 || dataVal == 10)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_GRASS:
+        // uses 1-10 - dead bush is a separate block, type==32
+        // type 31 dataVal 0 was once dead bush, I think it was called this long ago
+        // (in Bedrock it's "Fern", though) https://minecraft.wiki/w/Grass#Block_states
+        if (dataVal > 0 && dataVal < 11)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_CAKE:
+    case BLOCK_QUARTZ_BLOCK:
+    case BLOCK_INFESTED_STONE:
+    case BLOCK_END_ROD:
+    case BLOCK_CHORUS_FLOWER:
+    case BLOCK_OBSERVER:	// could also have top bit "fired", but no graphical effect
+    case BLOCK_ANDESITE_DOUBLE_SLAB:
+    case BLOCK_BAMBOO:
+    case BLOCK_JIGSAW:
+    case BLOCK_HEAD:
+        // uses 0-5 - could use more for 1.16 orientations, TODO
+        if (dataVal < 6)
+        {
+            addBlock = 1;
+            // for just chorus flower, put endstone below
+            if (origType == BLOCK_CHORUS_FLOWER)
+            {
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y - 1, 4 + (dataVal % 2) * 8)] = BLOCK_END_STONE;
+            }
+        }
+        break;
+    case BLOCK_POINTED_DRIPSTONE:
+        // uses 0-4 and 8-12 for different bits
+        if (dataVal < 5 || (dataVal >= 8 && dataVal <= 12))
+        {
+            addBlock = 1;
+            // and sulfur_spike version:
+            addDiagonalBlocksToMap(32, y, type, dataVal, finalDataVal, typeHighBit, block);
+        }
+        break;
+
+    case BLOCK_LIGHTNING_ROD:
+    case BLOCK_WAXED_LIGHTNING_ROD:
+        // uses 0-5 and 8-13 for different directions
+        // or for lightning rod, powered is top bit
+        if (dataVal < 6 || (dataVal >= 8 && dataVal <= 13))
+        {
+            addBlock = 1;
+        }
+        else if (dataVal == 6) {
+            addBlock = 1;
+            finalDataVal = BIT_16;
+        }
+        else if (dataVal == 7) {
+            addBlock = 1;
+            finalDataVal = BIT_32;
+        }
+        else if (dataVal == 14) {
+            addBlock = 1;
+            finalDataVal = BIT_32 | BIT_16;
+        }
+        break;
+
+    case BLOCK_DOUBLE_FLOWER:
+        // uses 0-6, put flower head above it
+        if (dataVal < 7)
+        {
+            addBlock = 1;
+            // add flower above
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = BLOCK_DOUBLE_FLOWER;
+            // not entirely sure about this number, but 10 seems to be the norm,
+            // but https://minecraft.wiki/w/Flower#Data_values says to use 8
+            // Note that the top half is made to be the dataVal, too, which is the modern
+            // way that nbt.cpp reads in this data. 1.12 and earlier would not have this set,
+            // but this artificial map is considered modern.
+            block->data[bi] = (unsigned char)(dataVal | 8);
+        }
+        break;
+
+    case BLOCK_SAPLING:	// now with bamboo and cherry
+    case BLOCK_PUMPKIN_STEM:
+    case BLOCK_MELON_STEM:
+    case BLOCK_OAK_WOOD_STAIRS:
+    case BLOCK_SPRUCE_WOOD_STAIRS:
+    case BLOCK_BIRCH_WOOD_STAIRS:
+    case BLOCK_JUNGLE_WOOD_STAIRS:
+    case BLOCK_QUARTZ_STAIRS:
+    case BLOCK_SNOW:
+    case BLOCK_END_PORTAL_FRAME:
+    case BLOCK_FENCE_GATE:
+    case BLOCK_SPRUCE_FENCE_GATE:
+    case BLOCK_BIRCH_FENCE_GATE:
+    case BLOCK_JUNGLE_FENCE_GATE:
+    case BLOCK_DARK_OAK_FENCE_GATE:
+    case BLOCK_ACACIA_FENCE_GATE:
+    case BLOCK_CRIMSON_FENCE_GATE:
+    case BLOCK_WARPED_FENCE_GATE:
+    case BLOCK_MANGROVE_FENCE_GATE:
+    case BLOCK_CHERRY_FENCE_GATE:
+    case BLOCK_BAMBOO_FENCE_GATE:
+    case BLOCK_PALE_OAK_FENCE_GATE:
+    case BLOCK_FARMLAND:
+    case BLOCK_BREWING_STAND:
+    case BLOCK_ACACIA_WOOD_STAIRS:
+    case BLOCK_DARK_OAK_WOOD_STAIRS:
+    case BLOCK_RED_SANDSTONE_STAIRS:
+    case BLOCK_PURPUR_STAIRS:
+    case BLOCK_PRISMARINE_STAIRS:
+    case BLOCK_PRISMARINE_BRICK_STAIRS:
+    case BLOCK_DARK_PRISMARINE_STAIRS:
+    case BLOCK_RED_SANDSTONE_DOUBLE_SLAB:
+    case BLOCK_PURPUR_DOUBLE_SLAB:
+    case BLOCK_COBBLESTONE_STAIRS:
+    case BLOCK_BRICK_STAIRS:
+    case BLOCK_STONE_BRICK_STAIRS:
+    case BLOCK_NETHER_BRICK_STAIRS:
+    case BLOCK_SANDSTONE_STAIRS:
+    case BLOCK_STONE_STAIRS:
+    case BLOCK_GRANITE_STAIRS:
+    case BLOCK_POLISHED_GRANITE_STAIRS:
+    case BLOCK_SMOOTH_QUARTZ_STAIRS:
+    case BLOCK_DIORITE_STAIRS:
+    case BLOCK_POLISHED_DIORITE_STAIRS:
+    case BLOCK_END_STONE_BRICK_STAIRS:
+    case BLOCK_ANDESITE_STAIRS:
+    case BLOCK_POLISHED_ANDESITE_STAIRS:
+    case BLOCK_RED_NETHER_BRICK_STAIRS:
+    case BLOCK_MOSSY_STONE_BRICK_STAIRS:
+    case BLOCK_MOSSY_COBBLESTONE_STAIRS:
+    case BLOCK_SMOOTH_SANDSTONE_STAIRS:
+    case BLOCK_SMOOTH_RED_SANDSTONE_STAIRS:
+    case BLOCK_CRIMSON_STAIRS:
+    case BLOCK_WARPED_STAIRS:
+    case BLOCK_BLACKSTONE_STAIRS:
+    case BLOCK_POLISHED_BLACKSTONE_STAIRS:
+    case BLOCK_POLISHED_BLACKSTONE_BRICK_STAIRS:
+    case BLOCK_CUT_COPPER_STAIRS:
+    case BLOCK_EXPOSED_CUT_COPPER_STAIRS:
+    case BLOCK_WEATHERED_CUT_COPPER_STAIRS:
+    case BLOCK_OXIDIZED_CUT_COPPER_STAIRS:
+    case BLOCK_WAXED_CUT_COPPER_STAIRS:
+    case BLOCK_WAXED_EXPOSED_CUT_COPPER_STAIRS:
+    case BLOCK_WAXED_WEATHERED_CUT_COPPER_STAIRS:
+    case BLOCK_WAXED_OXIDIZED_CUT_COPPER_STAIRS:
+    case BLOCK_COBBLED_DEEPSLATE_STAIRS:
+    case BLOCK_POLISHED_DEEPSLATE_STAIRS:
+    case BLOCK_DEEPSLATE_BRICKS_STAIRS:
+    case BLOCK_DEEPSLATE_TILES_STAIRS:
+    case BLOCK_MANGROVE_STAIRS:
+    case BLOCK_MUD_BRICK_STAIRS:
+    case BLOCK_CHERRY_STAIRS:
+    case BLOCK_BAMBOO_STAIRS:
+    case BLOCK_BAMBOO_MOSAIC_STAIRS:
+    case BLOCK_WOODEN_DOUBLE_SLAB:
+    case BLOCK_SUSPICIOUS_GRAVEL:
+    case BLOCK_TRIAL_SPAWNER:
+    case BLOCK_COPPER_GRATE:
+    case BLOCK_TUFF_STAIRS:
+    case BLOCK_POLISHED_TUFF_STAIRS:
+    case BLOCK_TUFF_BRICK_STAIRS:
+    case BLOCK_PALE_OAK_STAIRS:
+    case BLOCK_RESIN_BRICK_STAIRS:
+    case BLOCK_CINNABAR_STAIRS:
+    case BLOCK_POLISHED_CINNABAR_STAIRS:
+    case BLOCK_CINNABAR_BRICK_STAIRS:
+    case BLOCK_SULFUR_STAIRS:
+    case BLOCK_POLISHED_SULFUR_STAIRS:
+    case BLOCK_SULFUR_BRICK_STAIRS:
+        // uses 0-7 - TODO we could someday add more blocks to neighbor the others, in order to show the stairs' "step block trim" feature of week 39
+        if (dataVal < 8)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_WHEAT:
+    case BLOCK_CARROTS:
+    case BLOCK_POTATOES:
+        // uses 0-7, put farmland beneath it
+        if (dataVal < 8)
+        {
+            addBlock = 1;
+            // add farmland underneath
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y - 1, 4 + (dataVal % 2) * 8)] = BLOCK_FARMLAND;
+        }
+        break;
+    case BLOCK_COMPOSTER:
+        // uses 0-8
+        if (dataVal < 9)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_STONE_DOUBLE_SLAB:
+        // uses 0-7, 0xF (15)
+        // changed: we now don't show the old 15 slab, to avoid duplication
+        if (dataVal < 8) // || dataVal == 15) - double quartz slab duplicate, from some 1.12 or earlier version of Minecraft, I believe
+        {
+            addBlock = 1;
+        }
+        break;
+
+    case BLOCK_HUGE_BROWN_MUSHROOM:
+    case BLOCK_HUGE_RED_MUSHROOM:
+        // uses 0-10
+        if (dataVal < 11)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_OAK_PLANKS:
+    case BLOCK_POPPY:
+        // uses 0-11
+        if (dataVal < 12)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_CAULDRON:
+        // uses 0-11, but without 5-7
+        if (dataVal < 12 && (dataVal < 5 || dataVal > 7))
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_FLOWER_POT:
+        // uses 0-11 for old-style 1.7 flower pots; 12 and 13 for acacia and dark oak saplings, whenever those were added
+        if (dataVal < 14)
+        {
+            addBlock = 1;
+        }
+        // add new style diagonally SE of original
+        {
+            neighborIndex = BLOCK_INDEX(5 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            int neighborIndex2 = BLOCK_INDEX(6 + (type % 2) * 8, y, 6 + (dataVal % 2) * 8);
+            int neighborIndex3 = BLOCK_INDEX(7 + (type % 2) * 8, y, 7 + (dataVal % 2) * 8);
+            switch (dataVal) {
+            case 1:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = SAPLING_FIELD | 0;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = RED_FLOWER_FIELD | 7;
+                block->grid[neighborIndex3] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex3] = AZALEA_FIELD | 1;
+                break;
+            case 2:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = SAPLING_FIELD | 1;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = RED_FLOWER_FIELD | 8;
+                block->grid[neighborIndex3] = BLOCK_FLOWER_POT;  // cherry
+                block->data[neighborIndex3] = SAPLING_FIELD | 6;
+                break;
+            case 3:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = SAPLING_FIELD | 2;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = RED_MUSHROOM_FIELD | 0;
+                block->grid[neighborIndex3] = BLOCK_FLOWER_POT;  // torchflower
+                block->data[neighborIndex3] = YELLOW_FLOWER_FIELD | 1;  // torchflower
+                break;
+            case 4:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = SAPLING_FIELD | 3;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = BROWN_MUSHROOM_FIELD | 0;
+                block->grid[neighborIndex3] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex3] = YELLOW_FLOWER_FIELD | 2;
+                break;
+            case 5:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = SAPLING_FIELD | 4;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = DEADBUSH_FIELD | 0;
+                block->grid[neighborIndex3] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex3] = YELLOW_FLOWER_FIELD | 3;
+                break;
+            case 6:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = SAPLING_FIELD | 5;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = CACTUS_FIELD | 0;
+                block->grid[neighborIndex3] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex3] = SAPLING_FIELD | 7;
+                break;
+            case 7:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = TALLGRASS_FIELD | 2;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = RED_FLOWER_FIELD | 9;
+                block->grid[neighborIndex3] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex3] = YELLOW_FLOWER_FIELD | 4;
+                break;
+            case 8:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = YELLOW_FLOWER_FIELD | 0;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = RED_FLOWER_FIELD | 10;
+                break;
+            case 9:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = RED_FLOWER_FIELD | 0;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = RED_FLOWER_FIELD | 11;
+                break;
+            case 10:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = RED_FLOWER_FIELD | 1;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = BAMBOO_FIELD | 0;
+                break;
+            case 11:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = RED_FLOWER_FIELD | 2;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = RED_FLOWER_FIELD | 12;
+                break;
+            case 12:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = RED_FLOWER_FIELD | 3;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = RED_FLOWER_FIELD | 13;
+                break;
+            case 13:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = RED_FLOWER_FIELD | 4;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = RED_FLOWER_FIELD | 14;
+                break;
+            case 14:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = RED_FLOWER_FIELD | 5;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = RED_FLOWER_FIELD | 15;
+                break;
+            case 15:
+                block->grid[neighborIndex] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex] = RED_FLOWER_FIELD | 6;
+                block->grid[neighborIndex2] = BLOCK_FLOWER_POT;
+                block->data[neighborIndex2] = AZALEA_FIELD | 0;
+                break;
+            }
+        }
+        break;
+    case BLOCK_ANVIL:
+    case BLOCK_TURTLE_EGG: // number is 0-3, hatch is 0-2, total of 12
+        // uses 0-11
+        if (dataVal < 12)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_AMETHYST:
+        addBlock = 1;
+
+        // add new subtypes diagonally SE of original
+        neighborIndex = BLOCK_INDEX(5 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+        block->grid[neighborIndex] = (unsigned char)type;
+        block->data[neighborIndex] = (unsigned char)finalDataVal | BIT_16 | TYPE_PROMOTE_256;
+
+        neighborIndex = BLOCK_INDEX(6 + (type % 2) * 8, y, 6 + (dataVal % 2) * 8);
+        block->grid[neighborIndex] = (unsigned char)type;
+        block->data[neighborIndex] = (unsigned char)finalDataVal | BIT_32 | TYPE_PROMOTE_256;
+
+        neighborIndex = BLOCK_INDEX(7 + (type % 2) * 8, y, 7 + (dataVal % 2) * 8);
+        block->grid[neighborIndex] = (unsigned char)type;
+        block->data[neighborIndex] = (unsigned char)finalDataVal | BIT_32 | BIT_16 | TYPE_PROMOTE_256;
+
+        break;
+    case BLOCK_BONE_BLOCK:
+        // uses 0,1,2,3 for low bits in 0x3 - note, leaves out infested deepslate, which is a repeat of deepslate anyway
+        addBlock = 1;
+        break;
+
+        // TODO: fan in different directions
+    case BLOCK_CORAL_WALL_FAN:
+    case BLOCK_DEAD_CORAL_WALL_FAN:
+        // uses 0-15 - no waterlogging (no room!)
+    {
+        int coralVal = dataVal % 5;	// 0-4 types of coral - lowest three bits 123 (4 is unused)
+        int rotVal = (dataVal - coralVal) / 5; // rotate 0-3
+        finalDataVal = (0x80 | coralVal | (((rotVal + 3) % 4) << 4));	// put into bits 56
+        addBlock = 1;
+        // add attached block
+        switch (rotVal)
+        {
+        case 3:	// not actually used
+            // put block to south
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        case 1:
+            // put block to north
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        case 2:
+            // put block to east
+            block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        case 0:
+            // put block to west
+            block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        }
+    }
+    break;
+    case BLOCK_LOG:	// really just 12, but we pay attention to directionless
+    case BLOCK_AD_LOG:
+        // add "wood" variant to map diagonally SE of original
+        neighborIndex = BLOCK_INDEX(6 + (type % 2) * 8, y, 6 + (dataVal % 2) * 8);
+        block->grid[neighborIndex] = (unsigned char)type;
+        block->data[neighborIndex] = (unsigned short)(finalDataVal | BIT_16 | typeHighBit);
+        // uses all bits, 0-15
+        addBlock = 1;
+        break;
+    case BLOCK_MANGROVE_LOG:
+        // uses high bits for directions
+        if ((dataVal & 0x03) < 3) {    // mangrove and cherry and pale_oak
+            addBlock = 1;
+            // add "wood" variant to map diagonally SE of original
+            if (dataVal < ((origType == BLOCK_LOG) ? 4 : 2)) {
+                // add "wood" variant to map
+                neighborIndex = BLOCK_INDEX(6 + (type % 2) * 8, y, 6 + (dataVal % 2) * 8);
+                block->grid[neighborIndex] = (unsigned char)type;
+                block->data[neighborIndex] = (unsigned short)(finalDataVal | BIT_16 | typeHighBit);
+            }
+        }
+        break;
+    case BLOCK_STRIPPED_MANGROVE:
+    case BLOCK_STRIPPED_MANGROVE_WOOD:
+        // use 0-1,4-5,8-9,12-13
+        if ((dataVal & 0x03) < 3) {    // mangrove and cherry and pale oak
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_STRIPPED_OAK:
+    case BLOCK_STRIPPED_OAK_WOOD:
+    case BLOCK_STRIPPED_ACACIA:
+    case BLOCK_STRIPPED_ACACIA_WOOD:
+    case BLOCK_STONE_SLAB:
+    case BLOCK_WOODEN_SLAB:
+    case BLOCK_ANDESITE_SLAB:
+    case BLOCK_REDSTONE_REPEATER_OFF:
+    case BLOCK_REDSTONE_REPEATER_ON:
+    case BLOCK_REDSTONE_COMPARATOR:
+    case BLOCK_REDSTONE_COMPARATOR_DEPRECATED:
+    case BLOCK_COLORED_TERRACOTTA:
+    case BLOCK_STAINED_GLASS:
+    case BLOCK_STANDING_BANNER:
+    case BLOCK_WOOL:
+    case BLOCK_CONCRETE:
+    case BLOCK_CONCRETE_POWDER:
+    case BLOCK_ORANGE_BANNER:
+    case BLOCK_MAGENTA_BANNER:
+    case BLOCK_LIGHT_BLUE_BANNER:
+    case BLOCK_YELLOW_BANNER:
+    case BLOCK_LIME_BANNER:
+    case BLOCK_PINK_BANNER:
+    case BLOCK_GRAY_BANNER:
+    case BLOCK_LIGHT_GRAY_BANNER:
+    case BLOCK_CYAN_BANNER:
+    case BLOCK_PURPLE_BANNER:
+    case BLOCK_BLUE_BANNER:
+    case BLOCK_BROWN_BANNER:
+    case BLOCK_GREEN_BANNER:
+    case BLOCK_RED_BANNER:
+    case BLOCK_BLACK_BANNER:
+    case BLOCK_RED_SANDSTONE_SLAB:
+    case BLOCK_PURPUR_SLAB:
+    case BLOCK_CAMPFIRE:
+        // uses all bits, 0-15
+        addBlock = 1;
+        break;
+
+    case BLOCK_PINK_PETALS:
+        addBlock = 1;
+        addDiagonalBlocksToMap(48, y, type, dataVal, finalDataVal, typeHighBit, block);
+        break;
+
+    case BLOCK_CARPET:
+        addBlock = 1;
+        if (dataVal == 0) {
+            // add new style diagonally SE of original
+            neighborIndex = BLOCK_INDEX(5 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned short)(finalDataVal | BIT_16 | typeHighBit);
+        }
+        break;
+
+    case BLOCK_CUT_COPPER_DOUBLE_SLAB:
+        // double slabs don't have an 0x8 bit that means anything
+        if (dataVal < 8) {
+            addBlock = 1;
+            addDiagonalBlocksToMap(16+7, y, type, dataVal, finalDataVal, typeHighBit, block);
+        }
+        break;
+    case BLOCK_CUT_COPPER_SLAB:
+        addBlock = 1;
+        if ((dataVal & 0x7) < 7) {
+            // add new style diagonally SE of original
+            neighborIndex = BLOCK_INDEX(5 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            // TYPE_HIGH_BIT1 is redundant with typeHighBit here (these neighbor types are always > 255,
+            // so both terms agree), kept only because typeHighBit already covers the promotion.
+            block->data[neighborIndex] = (unsigned short)(finalDataVal | BIT_16 | typeHighBit);
+        }
+        break;
+
+    case BLOCK_CRIMSON_DOUBLE_SLAB:
+        // double slabs don't have an 0x8 bit that means anything; 6 doubles are above 0xf
+        if (dataVal < 8) {
+            addBlock = 1;
+            addDiagonalBlocksToMap(16+6, y, type, dataVal, finalDataVal, typeHighBit, block);
+        }
+        break;
+    case BLOCK_CRIMSON_SLAB:
+        addBlock = 1;
+        if ((dataVal & 0x7) < 6) {
+            // add new style diagonally SE of original
+            neighborIndex = BLOCK_INDEX(5 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            // TYPE_HIGH_BIT1 is redundant with typeHighBit here (these neighbor types are always > 255,
+            // so both terms agree), kept only because typeHighBit already covers the promotion.
+            block->data[neighborIndex] = (unsigned short)(finalDataVal | BIT_16 | typeHighBit);
+        }
+        break;
+
+    case BLOCK_SIGN_POST:
+    case BLOCK_ACACIA_SIGN_POST:
+    case BLOCK_MANGROVE_SIGN_POST:
+    case BLOCK_COLORED_CANDLE:
+    case BLOCK_LIT_COLORED_CANDLE:
+    case BLOCK_VAULT:
+        // uses all bits, 0-15 to 0-63, with variations to show other styles
+        addBlock = 1;
+        addDiagonalBlocksToMap(64, y, type, dataVal, finalDataVal, typeHighBit, block);
+        break;
+
+    case BLOCK_AMETHYST_BUD:
+        if (dataVal < 4) {
+            addBlock = 1;
+
+            // add the five other variants around a block of stone
+            neighborIndex = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = BLOCK_STONE;
+            block->data[neighborIndex] = 0x0;
+
+            neighborIndex = BLOCK_INDEX(3 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned char)(dataVal + (4 << 2)) | TYPE_PROMOTE_256;
+
+            neighborIndex = BLOCK_INDEX(5 + (type % 2) * 8, y+1, 4 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned char)(dataVal + (5 << 2)) | TYPE_PROMOTE_256;
+
+            neighborIndex = BLOCK_INDEX(4 + (type % 2) * 8, y+1, 3 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned char)(dataVal + (2 << 2)) | TYPE_PROMOTE_256;
+
+            neighborIndex = BLOCK_INDEX(4 + (type % 2) * 8, y+1, 5 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned char)(dataVal + (3 << 2)) | TYPE_PROMOTE_256;
+
+            neighborIndex = BLOCK_INDEX(4 + (type % 2) * 8, y+2, 4 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned char)(dataVal + (1 << 2)) | TYPE_PROMOTE_256;
+        }
+        break;
+    case BLOCK_CANDLE:
+    case BLOCK_LIT_CANDLE:
+        // uses 0x3 bits for number of candles
+        if (dataVal < 4) {
+            addBlock = 1;
+            finalDataVal = dataVal << 4;
+        }
+        break;
+    case BLOCK_WATER:
+    case BLOCK_STATIONARY_WATER:
+    case BLOCK_LAVA:
+    case BLOCK_STATIONARY_LAVA:
+        // water has no data value normally (bubble column is only exception)
+        finalDataVal = 0;
+        // uses 0-8, with 8 giving one above
+        if (dataVal <= 8)
+        {
+            addBlock = 1;
+
+            if (dataVal == 8)
+            {
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = (unsigned char)type;
+            }
+            else if (dataVal > 0)
+            {
+                int x = type % 2;
+                int z = 1-x;
+                block->grid[BLOCK_INDEX(x + 4 + (type % 2) * 8, y, z + 4 + (dataVal % 2) * 8)] = (unsigned char)type;
+            }
+        }
+        else if (origType == BLOCK_STATIONARY_WATER) {
+            // for stationary water, bubble column is put at bottom
+            if (dataVal == 15) {
+                addBlock = 1;
+                finalDataVal = BIT_16 | 8;
+                // put block above, if we want the block below to go fully to the top:
+                //block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = (unsigned char)type;
+            }
+        }
+        break;
+    case BLOCK_ENDER_CHEST:
+        // uses 2-5
+        if (dataVal >= 2 && dataVal <= 5)
+        {
+            addBlock = 1;
+        }
+        else if (dataVal >= 6 && dataVal <= 9)
+        {
+            addBlock = 1;
+            finalDataVal = (dataVal - 4) | WATERLOGGED_BIT;	// waterlogged
+        }
+        break;
+    case BLOCK_FURNACE:
+        // uses 0-15, remapping dataVal to the four facings of the furnace, loom, smoker, and blast furnace 
+        addBlock = 1;
+        finalDataVal = ((dataVal & 0xC) << 2) + (dataVal & 0x3) + 2;
+        break;
+    case BLOCK_BURNING_FURNACE:
+        // uses 0-3 and 8-15, remapping dataVal to the four facings of the furnace, loom, smoker, and blast furnace
+        if (dataVal < 4 || dataVal >= 8) {
+            addBlock = 1;
+            finalDataVal = ((dataVal & 0xC) << 2) + (dataVal & 0x3) + 2;
+        }
+        break;
+    case BLOCK_BOOKSHELF:
+        // uses 0 and 1-4 and 9-12, remapping dataVal to the four facings of the chiseled bookshelf, empty and occupied
+        if (dataVal == 0) {
+            addBlock = 1;
+        }
+        else if ((dataVal & 0x7) >= 1 && (dataVal & 0x7) <= 4) {
+            addBlock = 1;
+            finalDataVal = dataVal | BIT_16;
+        }
+        break;
+    case BLOCK_DISPENSER:
+    case BLOCK_DROPPER:
+        if (dataVal <= 5)
+        {
+            addBlock = 1;
+            switch (dataVal)
+            {
+            case 0:
+            case 1:
+                // make the block itself be up by two, so we can examine its top and bottom
+                bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 2, 4 + (dataVal % 2) * 8);
+                block->grid[bi] = (unsigned char)type;
+                block->data[bi] = (unsigned short)(dataVal | typeHighBit);
+                addBlock = 0;
+                break;
+            }
+        }
+        break;
+
+    case BLOCK_HOPPER:
+        // uses 0, 2-5
+        if (dataVal <= 5 && dataVal != 1)
+        {
+            addBlock = 1;
+            switch (dataVal)
+            {
+            default:
+                assert(0);
+            case 0:
+                // make the block itself be up by two, so we can examine its top and bottom
+                bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 2, 4 + (dataVal % 2) * 8);
+                block->grid[bi] = (unsigned char)type;
+                block->data[bi] = (unsigned short)(dataVal | typeHighBit);
+                addBlock = 0;
+                break;
+            case 2:
+                // put block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 3:
+                // put block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 4:
+                // put block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 5:
+                // put block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            }
+        }
+        break;
+
+    case BLOCK_TORCH:
+    case BLOCK_REDSTONE_TORCH_OFF:
+    case BLOCK_REDSTONE_TORCH_ON:
+    case BLOCK_SOUL_TORCH:
+    case BLOCK_COPPER_TORCH:
+        if (dataVal >= 1 && dataVal <= 5)
+        {
+            addBlock = 1;
+            switch (dataVal)
+            {
+            case 1:
+                // put block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 2:
+                // put block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 3:
+                // put block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 4:
+                // put block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            default:
+                // do nothing - on ground
+                break;
+            }
+        }
+        break;
+    case BLOCK_LADDER:
+        // show with and without waterlogging
+        if ((dataVal & 0x7) >= 2 && (dataVal & 0x7) <= 5)
+        {
+            addBlock = 1;
+            switch (dataVal & 0x7)
+            {
+            case 2:
+                // put block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 3:
+                // put block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 4:
+                // put block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 5:
+                // put block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            }
+            finalDataVal = (dataVal & 0x7) | ((dataVal >= 8) ? WATERLOGGED_BIT : 0x0);
+        }
+        break;
+    case BLOCK_GLOW_LICHEN:
+    case BLOCK_SCULK_VEIN:
+    case BLOCK_RESIN_CLUMP:
+        // show with and without waterlogging
+        // note we don't try all permutations (6 bits)
+        if ((dataVal & 0x7) <= 5)
+        {
+            addBlock = 1;
+            // dropper facing
+            switch (dataVal & 0x7)
+            {
+            case 0:
+                // put block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 1:
+                // put block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 2:
+                // put block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 3:
+                // put block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            default:
+                assert(0);
+            case 4:
+                break;
+            case 5:
+                // put block above
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            }
+            finalDataVal = (1 << (dataVal & 0x7)) | ((dataVal >= 8) ? WATERLOGGED_BIT : 0x0);
+        }
+        break;
+    case BLOCK_WALL_BANNER:
+    case BLOCK_ORANGE_WALL_BANNER:
+    case BLOCK_MAGENTA_WALL_BANNER:
+    case BLOCK_LIGHT_BLUE_WALL_BANNER:
+    case BLOCK_YELLOW_WALL_BANNER:
+    case BLOCK_LIME_WALL_BANNER:
+    case BLOCK_PINK_WALL_BANNER:
+    case BLOCK_GRAY_WALL_BANNER:
+    case BLOCK_LIGHT_GRAY_WALL_BANNER:
+    case BLOCK_CYAN_WALL_BANNER:
+    case BLOCK_PURPLE_WALL_BANNER:
+    case BLOCK_BLUE_WALL_BANNER:
+    case BLOCK_BROWN_WALL_BANNER:
+    case BLOCK_GREEN_WALL_BANNER:
+    case BLOCK_RED_WALL_BANNER:
+    case BLOCK_BLACK_WALL_BANNER:
+        if (dataVal >= 2 && dataVal <= 5)
+        {
+            addBlock = 1;
+            switch (dataVal)
+            {
+            case 2:
+                // put block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 3:
+                // put block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 4:
+                // put block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 5:
+                // put block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            }
+        }
+        break;
+
+    case BLOCK_WALL_SIGN:
+    case BLOCK_MANGROVE_WALL_SIGN:
+        // there are now 8 materials for wall signs and 4 for mangrove wall signs. Rather than going absolutely nuts, we change the dataVal for each.
+        // directions are 2-5, so allow those and 10-13
+        if ((dataVal & 0x7) >= 2 && (dataVal & 0x7) <= 5)
+        {
+            addBlock = 1;
+            // set higher bits BIT_8 and BIT_16
+            if (origType == BLOCK_WALL_SIGN) {
+                // cycle 8 materials
+                finalDataVal = ((dataVal % 8) << 3) | (dataVal & 0x7);
+            }
+            else {
+                // cycle 4 materials
+                finalDataVal = ((dataVal % 4) << 3) | (dataVal & 0x7);
+            }
+
+            switch (dataVal & 0x7)
+            {
+                // do all the wood types
+            default:
+                assert(0);
+            case 2:
+                // put block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 3:
+                // put block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 4:
+                // put block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 5:
+                // put block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            }
+        }
+        break;
+
+    case BLOCK_RAIL:
+        if (dataVal >= 6 && dataVal <= 9)
+        {
+            addBlock = 1;
+            break;
+        }
+        // test if too high - if so, ignore
+        else if (dataVal > 9)
+        {
+            break;
+        } // else:
+        // falls through on 0 through 5, since these are handled below for all rails
+    case BLOCK_POWERED_RAIL:
+    case BLOCK_DETECTOR_RAIL:
+    case BLOCK_ACTIVATOR_RAIL:
+        trimVal = dataVal & 0x7;
+        if (trimVal <= 5)
+        {
+            addBlock = 1;
+            switch (trimVal)
+            {
+            case 2:
+                // put block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 3:
+                // put block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 4:
+                // put block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 5:
+                // put block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            default:
+                // do nothing - on ground
+                break;
+            }
+        }
+        break;
+    case BLOCK_LEVER:
+        trimVal = dataVal & 0x7;
+        addBlock = 1;
+        switch (dataVal & 0x7)
+        {
+        case 1:
+            // put block to west
+            block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        case 2:
+            // put block to east
+            block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        case 3:
+            // put block to north
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        case 4:
+            // put block to south
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        case 7:
+        case 0:
+            // put block above
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        default:
+            // do nothing - on ground
+            break;
+        }
+        break;
+    case BLOCK_WOODEN_DOOR:
+    case BLOCK_IRON_DOOR:
+    case BLOCK_SPRUCE_DOOR:
+    case BLOCK_BIRCH_DOOR:
+    case BLOCK_JUNGLE_DOOR:
+    case BLOCK_DARK_OAK_DOOR:
+    case BLOCK_ACACIA_DOOR:
+    case BLOCK_PALE_OAK_DOOR:
+    case BLOCK_CRIMSON_DOOR:
+    case BLOCK_WARPED_DOOR:
+    case BLOCK_MANGROVE_DOOR:
+    case BLOCK_CHERRY_DOOR:
+    case BLOCK_BAMBOO_DOOR:
+    case BLOCK_COPPER_DOOR:
+    case BLOCK_EXPOSED_COPPER_DOOR:
+    case BLOCK_WEATHERED_COPPER_DOOR:
+    case BLOCK_OXIDIZED_COPPER_DOOR:
+    case BLOCK_WAXED_COPPER_DOOR:
+    case BLOCK_WAXED_EXPOSED_COPPER_DOOR:
+    case BLOCK_WAXED_WEATHERED_COPPER_DOOR:
+    case BLOCK_WAXED_OXIDIZED_COPPER_DOOR:
+        bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+        block->grid[bi] = (unsigned char)type;
+        block->data[bi] = (unsigned short)((dataVal & 0x7) | typeHighBit);
+        if (dataVal < 8)
+        {
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] = (unsigned short)(8 | typeHighBit);
+        }
+        else
+        {
+            // other direction door (for double doors)
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] = (unsigned short)(9 | typeHighBit);
+        }
+        break;
+    case BLOCK_BED:
+        if (dataVal < 8)
+        {
+            addBlock = 1;
+            switch (dataVal & 0x3)
+            {
+            case 0:
+                // put head to south
+                bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+                block->grid[bi] = (unsigned char)type;
+                block->data[bi] |= (unsigned char)(dataVal | 0x8);
+                break;
+            case 1:
+                // put head to west
+                bi = BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+                block->grid[bi] = (unsigned char)type;
+                block->data[bi] |= (unsigned char)(dataVal | 0x8);
+                break;
+            case 2:
+                // put head to north
+                bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8);
+                block->grid[bi] = (unsigned char)type;
+                block->data[bi] |= (unsigned char)(dataVal | 0x8);
+                break;
+            case 3:
+                // put head to east
+                bi = BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+                block->grid[bi] = (unsigned char)type;
+                block->data[bi] |= (unsigned char)(dataVal | 0x8);
+                break;
+            }
+        }
+        break;
+    case BLOCK_STONE_BUTTON:
+    case BLOCK_WOODEN_BUTTON:
+    case BLOCK_SPRUCE_BUTTON:
+    case BLOCK_BIRCH_BUTTON:
+    case BLOCK_JUNGLE_BUTTON:
+    case BLOCK_ACACIA_BUTTON:
+    case BLOCK_DARK_OAK_BUTTON:
+    case BLOCK_PALE_OAK_BUTTON:
+    case BLOCK_CRIMSON_BUTTON:
+    case BLOCK_WARPED_BUTTON:
+    case BLOCK_POLISHED_BLACKSTONE_BUTTON:
+    case BLOCK_MANGROVE_BUTTON:
+    case BLOCK_CHERRY_BUTTON:
+    case BLOCK_BAMBOO_BUTTON:
+        trimVal = dataVal & 0x7;
+        if (trimVal <= 5)
+        {
+            addBlock = 1;
+            switch (trimVal)
+            {
+            case 0:
+                // put block above
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = BLOCK_OBSIDIAN;
+                break;
+            case 1:
+                // put block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_OBSIDIAN;
+                break;
+            case 2:
+                // put block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_OBSIDIAN;
+                break;
+            case 3:
+                // put block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_OBSIDIAN;
+                break;
+            case 4:
+                // put block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_OBSIDIAN;
+                break;
+            case 5:
+                // put block below
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y - 1, 4 + (dataVal % 2) * 8)] = BLOCK_OBSIDIAN;
+            }
+        }
+        break;
+    case BLOCK_TRAPDOOR:
+    case BLOCK_IRON_TRAPDOOR:
+    case BLOCK_SPRUCE_TRAPDOOR:
+    case BLOCK_BIRCH_TRAPDOOR:
+    case BLOCK_JUNGLE_TRAPDOOR:
+    case BLOCK_ACACIA_TRAPDOOR:
+    case BLOCK_DARK_OAK_TRAPDOOR:
+    case BLOCK_CRIMSON_TRAPDOOR:
+    case BLOCK_WARPED_TRAPDOOR:
+    case BLOCK_MANGROVE_TRAPDOOR:
+    case BLOCK_CHERRY_TRAPDOOR:
+    case BLOCK_BAMBOO_TRAPDOOR:
+    case BLOCK_COPPER_TRAPDOOR:
+    case BLOCK_EXPOSED_COPPER_TRAPDOOR:
+    case BLOCK_WEATHERED_COPPER_TRAPDOOR:
+    case BLOCK_OXIDIZED_COPPER_TRAPDOOR:
+    case BLOCK_WAXED_COPPER_TRAPDOOR:
+    case BLOCK_WAXED_EXPOSED_COPPER_TRAPDOOR:
+    case BLOCK_WAXED_WEATHERED_COPPER_TRAPDOOR:
+    case BLOCK_WAXED_OXIDIZED_COPPER_TRAPDOOR:
+    case BLOCK_PALE_OAK_TRAPDOOR:
+        // use all 0-15
+        addBlock = 1;
+
+        trimVal = dataVal & 0x3;
+        switch (trimVal)
+        {
+        case 3:
+            // put block to west
+            block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        case 2:
+            // put block to east
+            block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        case 1:
+            // put block to north
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        case 0:
+            // put block to south
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        }
+        break;
+    case BLOCK_PISTON:
+    case BLOCK_STICKY_PISTON:
+        trimVal = dataVal & 0x7;
+        if (trimVal < 6)
+        {
+            addBlock = 1;
+
+            // is piston extended?
+            if (dataVal & 0x8)
+            {
+                int bx = 0;
+                int by = 0;
+                int bz = 0;
+
+                switch (trimVal)
+                {
+                case 0: // pointing down
+                    bx = 4 + (type % 2) * 8;
+                    by = y;
+                    bz = 4 + (dataVal % 2) * 8;
+                    // increase y by 1 so piston is one block higher
+                    y++;
+                    break;
+                case 1: // pointing up
+                    bx = 4 + (type % 2) * 8;
+                    by = y + 1;
+                    bz = 4 + (dataVal % 2) * 8;
+                    break;
+                case 2: // pointing north
+                    bx = 4 + (type % 2) * 8;
+                    by = y;
+                    bz = 3 + (dataVal % 2) * 8;
+                    break;
+                case 3: // pointing south
+                    bx = 4 + (type % 2) * 8;
+                    by = y;
+                    bz = 5 + (dataVal % 2) * 8;
+                    break;
+                case 4: // pointing west
+                    bx = 3 + (type % 2) * 8;
+                    by = y;
+                    bz = 4 + (dataVal % 2) * 8;
+                    break;
+                case 5: // pointing east
+                    bx = 5 + (type % 2) * 8;
+                    by = y;
+                    bz = 4 + (dataVal % 2) * 8;
+                    break;
+                default:
+                    assert(0);
+                    break;
+                }
+                bi = BLOCK_INDEX(bx, by, bz);
+                block->grid[bi] = BLOCK_PISTON_HEAD;
+                // sticky or not, plus direction
+                block->data[bi] |= (unsigned char)(trimVal | ((origType == BLOCK_STICKY_PISTON) ? 0x8 : 0x0));
+            }
+        }
+        break;
+    case BLOCK_PISTON_HEAD:
+        // uses bits 0-5 and 8-13
+        if ((dataVal & 0x7) < 6)
+        {
+            if ((dataVal & 0x7) != 1)
+            {
+                // add glass so that when 3D printing it's not deleted;
+                // it will be deleted when pointing up.
+                bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+                block->grid[bi] = BLOCK_GLASS_PANE;
+            }
+            // make it float above ground, to avoid asserts and to test.
+            y++;
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_VINES:
+        // uses all bits, 0-15
+        // TODO: really should place vines under stuff, but this is a pain
+        if (dataVal > 0)
+        {
+            addBlock = 1;
+        }
+        bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+        block->grid[bi] = (unsigned char)type;
+        block->data[bi] = (unsigned short)(dataVal | typeHighBit);
+
+        block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 2, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+        break;
+    case BLOCK_FENCE:
+    case BLOCK_SPRUCE_FENCE:
+    case BLOCK_BIRCH_FENCE:
+    case BLOCK_JUNGLE_FENCE:
+    case BLOCK_DARK_OAK_FENCE:
+    case BLOCK_ACACIA_FENCE:
+    case BLOCK_NETHER_BRICK_FENCE:
+    case BLOCK_CRIMSON_FENCE:
+    case BLOCK_WARPED_FENCE:
+    case BLOCK_MANGROVE_FENCE:
+    case BLOCK_CHERRY_FENCE:
+    case BLOCK_BAMBOO_FENCE:
+    case BLOCK_PALE_OAK_FENCE:
+    case BLOCK_IRON_BARS:
+    case BLOCK_GLASS_PANE:
+    case BLOCK_CHORUS_PLANT:
+        // this one is specialized: dataVal says where to put neighbors, NSEW
+        addBlock = 1;
+        //bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+        //block->grid[bi] = (unsigned char)type;
+        //block->data[bi] = (unsigned char)finalDataVal;
+
+        // put block above, too, for every fifth one, just to see it's working
+        if ((dataVal % 5) == 4) {
+            finalDataVal |= (origType > 0xff) ? BIT_32 : 0;
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            // just a post
+            block->data[bi] = (unsigned short)(((origType == BLOCK_CHORUS_PLANT)? BIT_16 : 0) | typeHighBit);
+        }
+
+        // for just chorus plant, put endstone below
+        if (origType == BLOCK_CHORUS_PLANT)
+        {
+            finalDataVal |= BIT_16;
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y - 1, 4 + (dataVal % 2) * 8)] = BLOCK_END_STONE;
+            // half the time also put chorus flower above
+            if (dataVal & 0x1) {
+                finalDataVal |= BIT_32;
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = BLOCK_CHORUS_FLOWER;
+            }
+        }
+
+        if (dataVal & 0x4)
+        {
+            // put block to north
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] = (unsigned short)(0x1 | typeHighBit);
+        }
+        if (dataVal & 0x8)
+        {
+            // put block to east
+            bi = BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] = (unsigned short)(0x2 | typeHighBit);
+        }
+        if (dataVal & 0x1)
+        {
+            // put block to south
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] = (unsigned short)(0x4 | typeHighBit);
+        }
+        if (dataVal & 0x2)
+        {
+            // put block to west
+            bi = BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] = (unsigned short)(0x8 | typeHighBit);
+        }
+        break;
+    case BLOCK_COPPER_BARS:
+    case BLOCK_WAXED_COPPER_BARS:
+        // this one is specialized: dataVal says where to put neighbors, NSEW
+        // But, since there are four tyues of copper bars, we need to set high bits, too.
+        addBlock = 1;
+        //bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+        //block->grid[bi] = (unsigned char)type;
+        //block->data[bi] = (unsigned char)finalDataVal;
+
+        // put block above, too, for every fifth one, just to see it's working
+        if ((dataVal % 5) == 4) {
+            finalDataVal |= (origType > 0xff) ? BIT_32 : 0;
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            // just a post
+            block->data[bi] = (unsigned short)(((origType == BLOCK_CHORUS_PLANT) ? BIT_16 : 0) | typeHighBit);
+        }
+
+        if (dataVal & 0x4)
+        {
+            // set 0x10 bit for a different bar color
+            finalDataVal |= BIT_16;
+        }
+        if (dataVal & 0x8)
+        {
+            // set 0x20 bit for a different bar color
+            finalDataVal |= BIT_32;
+        }
+        if (dataVal & 0x1)
+        {
+            // put block to south
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] = (unsigned short)(0x4 | typeHighBit);
+        }
+        if (dataVal & 0x2)
+        {
+            // put block to west
+            bi = BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] = (unsigned short)(0x8 | typeHighBit);
+        }
+        break;
+    case BLOCK_STAINED_GLASS_PANE:	// color AND neighbors!
+        // this one is specialized: incoming dataVal chooses where to put neighbors, NSEW
+        // *and* what color to use. Unlike the "clear" glass pane, above, the 4 bits
+        // in the final dataVal are the color, not the neighbors. :( - need more bits
+        bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+        block->grid[bi] = (unsigned char)type;
+        block->data[bi] = (unsigned short)(dataVal | typeHighBit);
+
+        if (dataVal & 0x1)
+        {
+            // alternate between wall and mossy wall - we set mossy wall if odd
+            block->data[bi] |= (unsigned char)0x1;
+
+            // put block to north
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            // alternate between wall and mossy wall
+            block->data[bi] = (unsigned short)(dataVal | typeHighBit);
+        }
+        if (dataVal & 0x2)
+        {
+            // put block to east
+            bi = BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            // alternate between wall and mossy wall
+            block->data[bi] = (unsigned short)(dataVal | typeHighBit);
+        }
+        if (dataVal & 0x4)
+        {
+            // put block to south
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            // alternate between wall and mossy wall
+            block->data[bi] = (unsigned short)(dataVal | typeHighBit);
+        }
+        if (dataVal & 0x8)
+        {
+            // put block to west
+            bi = BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            // alternate between wall and mossy wall
+            block->data[bi] = (unsigned short)(dataVal | typeHighBit);
+        }
+        break;
+    case BLOCK_COBBLESTONE_WALL:
+        // this one is specialized: dataVal just says where to put neighbors, NSEW
+        bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+        block->grid[bi] = (unsigned char)type;
+
+        // put block above, too, for every seventh one, just to see it's working
+        if ((dataVal % 7) == 5)
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = (unsigned char)type;
+
+        if (dataVal & 0x1)
+        {
+            // alternate between wall and mossy wall - we set mossy wall if odd
+            block->data[bi] |= (unsigned short)(0x1 | typeHighBit);
+
+            // put block to north
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            // alternate between wall and mossy wall
+            block->data[bi] |= (unsigned short)((dataVal % 2) | typeHighBit);
+        }
+        if (dataVal & 0x2)
+        {
+            // put block to east
+            bi = BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            // alternate between wall and mossy wall
+            block->data[bi] |= (unsigned short)((dataVal % 2) | typeHighBit);
+        }
+        if (dataVal & 0x4)
+        {
+            // put block to south
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            // alternate between wall and mossy wall
+            block->data[bi] |= (unsigned short)((dataVal % 2) | typeHighBit);
+        }
+        if (dataVal & 0x8)
+        {
+            // put block to west
+            bi = BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            // alternate between wall and mossy wall
+            block->data[bi] |= (unsigned short)((dataVal % 2) | typeHighBit);
+        }
+        // add neighbor of different material, to see it
+        neighborIndex = BLOCK_INDEX(7 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+        block->grid[neighborIndex] = (unsigned char)type;
+        block->data[neighborIndex] = (unsigned short)(dataVal | typeHighBit);
+        neighborIndex = BLOCK_INDEX(7 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+        block->grid[neighborIndex] = (unsigned char)type;
+        block->data[neighborIndex] = (unsigned short)(dataVal | typeHighBit);
+        neighborIndex = BLOCK_INDEX(7 + (type % 2) * 8, y, 6 + (dataVal % 2) * 8);
+        block->grid[neighborIndex] = (unsigned char)type;
+        block->data[neighborIndex] = (unsigned short)(dataVal | typeHighBit);
+
+        // 16 through 31, just a post
+        neighborIndex = BLOCK_INDEX(7 + (type % 2) * 8, y, 7 + (dataVal % 2) * 8);
+        block->grid[neighborIndex] = (unsigned char)type;
+        block->data[neighborIndex] = (unsigned short)(dataVal | BIT_16 | typeHighBit);
+        break;
+    case BLOCK_REDSTONE_WIRE:
+        // this one is specialized: dataVal just says where to put neighbors, NSEW
+        bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+        block->grid[bi] = (unsigned char)type;
+
+        if (dataVal & 0x1)
+        {
+            // put block to north
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 3 + (dataVal % 2) * 8)] = (unsigned char)type;
+        }
+        if (dataVal & 0x2)
+        {
+            // put block to east
+            block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = (unsigned char)type;
+        }
+        if (dataVal & 0x4)
+        {
+            // put block to south
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 5 + (dataVal % 2) * 8)] = (unsigned char)type;
+        }
+        if (dataVal & 0x8)
+        {
+            // put block to west, redstone atop it
+            block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = (unsigned char)type;
+        }
+        break;
+    case BLOCK_CACTUS:
+        // put on sand
+        if (dataVal == 0)
+        {
+            addBlock = 1;
+            // put sand below
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y - 1, 4 + (dataVal % 2) * 8)] = BLOCK_SAND;
+        }
+        break;
+    case BLOCK_CHEST:
+    case BLOCK_TRAPPED_CHEST:
+        // uses 2-5, we add an extra chest on 0x8
+        trimVal = dataVal & 0x7;
+        if (trimVal >= 2 && trimVal <= 5)
+        {
+            // Note that we use trimVal here, different than the norm
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 4 + (trimVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] |= (unsigned short)(trimVal | typeHighBit);
+        }
+        // double-chest on 0x8 (for mapping - in Minecraft chests have just 2,3,4,5)
+        // - locked chests (April Fool's joke) don't really have doubles, but whatever
+        switch (dataVal)
+        {
+        case 0x8 | 2:
+        case 0x8 | 3:
+            // north/south, so put one to west (-1 X)
+            bi = BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (trimVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] |= (unsigned short)(trimVal | typeHighBit);
+            break;
+        case 0x8 | 4:
+        case 0x8 | 5:
+            // west/east, so put one to north (-1 Z)
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (trimVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] |= (unsigned short)(trimVal | typeHighBit);
+            break;
+        default:
+            // fine - do nothing
+            break;
+        }
+        break;
+    case BLOCK_COPPER_CHEST:
+    case BLOCK_OXIDIZED_COPPER_CHEST:
+    case BLOCK_WAXED_COPPER_CHEST:
+    case BLOCK_WAXED_OXIDIZED_COPPER_CHEST:
+        // uses 2-5, we add an extra chest on 0x8
+        trimVal = dataVal & 0x7;
+        // 10-13 are the second type of chest (different material)
+        trimAndMtlVal = trimVal | (dataVal >= 8 ? 0x20 : 0x00);
+        if (trimVal >= 2 && trimVal <= 5)
+        {
+            // Note that we use trimVal here, different than the norm
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 4 + (trimVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] |= (unsigned short)(trimAndMtlVal | typeHighBit);
+        }
+        // double-chest on 0x8 (for mapping - in Minecraft chests have just 2,3,4,5)
+        // - locked chests (April Fool's joke) don't really have doubles, but whatever
+        switch (dataVal)
+        {
+        case 0x8 | 2:
+        case 0x8 | 3:
+            // north/south, so put one to west (-1 X)
+            bi = BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (trimVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] |= (unsigned short)(trimAndMtlVal | typeHighBit);
+            break;
+        case 0x8 | 4:
+        case 0x8 | 5:
+            // west/east, so put one to north (-1 Z)
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (trimVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] |= (unsigned short)(trimAndMtlVal | typeHighBit);
+            break;
+        default:
+            // fine - do nothing
+            break;
+        }
+        break;
+    case BLOCK_LILY_PAD:
+    case BLOCK_FROGSPAWN:
+        if (dataVal == 0)
+        {
+            int wrow, wcol;
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = (unsigned char)type;
+            for (wrow = 3; wrow <= 5; wrow++)
+                for (wcol = 3; wcol <= 5; wcol++)
+                    block->grid[BLOCK_INDEX(wrow + (type % 2) * 8, y - 1, wcol + (dataVal % 2) * 8)] = BLOCK_STATIONARY_WATER;
+        }
+        break;
+    case BLOCK_COCOA_PLANT:
+        if (dataVal < 12)
+        {
+            addBlock = 1;
+            switch (dataVal & 0x3)
+            {
+            case 0:
+                // put block to south
+                bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+                break;
+            case 1:
+                // put block to west
+                bi = BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+                break;
+            case 2:
+                // put block to north
+                bi = BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8);
+                break;
+            case 3:
+                // put block to east
+                bi = BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8);
+                break;
+            }
+            block->grid[bi] = BLOCK_LOG;
+            block->data[bi] |= 3 | typeHighBit;	// jungle
+        }
+        break;
+
+    case BLOCK_TRIPWIRE_HOOK:
+        addBlock = 1;
+        switch (dataVal & 0x3)
+        {
+        case 0:
+            // put block to north
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_OAK_PLANKS;
+            break;
+        case 1:
+            // put block to east
+            block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_OAK_PLANKS;
+            break;
+        case 2:
+            // put block to south
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_OAK_PLANKS;
+            break;
+        case 3:
+            // put block to west
+            block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_OAK_PLANKS;
+            break;
+        }
+        break;
+
+    case BLOCK_HAY:
+        // uses 0-2,4-6,8-10
+        if (dataVal < 11 && (dataVal%4 != 3)) {
+            addBlock = 1;
+        }
+        break;
+
+    case BLOCK_PURPUR_PILLAR:
+    case BLOCK_SNIFFER_EGG:
+        // uses 0,4,8
+        if ((dataVal == 0) || (dataVal == 4) || (dataVal == 8)) {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_TALL_SEAGRASS:
+        if (dataVal < 1)
+        {
+            addBlock = 1;
+            // add leaves above
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)(BLOCK_TALL_SEAGRASS & 0xFF);
+            block->data[bi] = (unsigned short)(8 | TYPE_PROMOTE_256);	// like flower, add 8
+        }
+        break;
+    case BLOCK_WEEPING_VINES:
+        if (dataVal < 3)
+        {
+            addBlock = 1;
+            if (dataVal < 2) {
+                // add leaves above
+                bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+                block->grid[bi] = (unsigned char)(BLOCK_WEEPING_VINES & 0xFF);
+                if (dataVal == 0) {
+                    finalDataVal = BIT_32;
+                    block->data[bi] = (unsigned short)TYPE_PROMOTE_256;
+                    // hang off something
+                    bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 2, 4 + (dataVal % 2) * 8);
+                    block->grid[bi] = (unsigned char)BLOCK_STONE;
+                }
+                else {
+                    // twisting vines are 0x1
+                    block->data[bi] = (unsigned short)(TYPE_PROMOTE_256 | BIT_32 | 0x1);
+                }
+            }
+            else {
+                // hang off something
+                bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+                block->grid[bi] = (unsigned char)BLOCK_STONE;
+            }
+        }
+        break;
+    case BLOCK_KELP:
+        if (dataVal < 1)
+        {
+            addBlock = 1;
+            // add leaves above
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)(BLOCK_KELP & 0xFF);
+            // not entirely sure about this number, but 10 seems to be the norm
+            block->data[bi] = (unsigned short)(1 | TYPE_PROMOTE_256);	// just add 1 for top
+        }
+        break;
+    case BLOCK_SEA_PICKLE:
+        // uses 0-3, but also with waterlogged
+        if (dataVal < 8)
+        {
+            addBlock = 1;
+            if (dataVal >= 4) {
+                finalDataVal = (dataVal & 0x3) | WATERLOGGED_BIT;	// waterlogged
+            }
+        }
+        break;
+    case BLOCK_CHAIN:
+        // uses 0-2 to mean 0,4,8, but also with waterlogged
+        if (dataVal < 6)
+        {
+            addBlock = 1;
+            finalDataVal = ((dataVal % 3) * 4) | ((dataVal >= 3) ? WATERLOGGED_BIT : 0);	// waterlogged
+        }
+        // show the 8 copper chains
+        else if (dataVal < 9) {
+            // show the 3 first copper chains
+            addBlock = 1;
+            finalDataVal = dataVal - 6 + 4;
+        }
+        else if (dataVal < 13) {
+            addBlock = 1;
+            finalDataVal = BIT_16 | (dataVal - 9) | 4;
+        }
+        else if (dataVal == 13) {
+            addBlock = 1;
+            finalDataVal = BIT_32 | 4;
+        }
+        break;
+    case BLOCK_CONDUIT:
+    case BLOCK_HEAVY_CORE:
+        // also with waterlogged
+        if (dataVal < 2)
+        {
+            addBlock = 1;
+            finalDataVal = (dataVal >= 1) ? WATERLOGGED_BIT : 0;	// waterlogged
+        }
+        break;
+    case BLOCK_BARREL:
+        // uses bits 0-5 and 8-13
+        if ((dataVal & 0x7) < 6)
+        {
+            addBlock = 1;
+        }
+        break;
+    case BLOCK_BELL:
+        addBlock = 1;
+        switch (dataVal & 0xc)
+        {
+        case 0x4:	// ceiling
+            // put block above
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+            break;
+        case 0x8:	// single wall
+            switch (dataVal & 0x3)
+            {
+            case 0:
+                // put block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 1:
+                // put block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 2:
+                // put block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 3:
+                // put block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            }
+            break;
+        case 0xc:	// double wall
+            switch (dataVal & 0x3)
+            {
+            case 0:
+            case 2:
+                // put block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                // put block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 1:
+            case 3:
+                // put block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                // put block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            }
+            break;
+        default:	// floor
+            // do nothing - on ground
+            break;
+        }
+        break;
+    case BLOCK_GRINDSTONE:
+        if (dataVal < 12) {
+            addBlock = 1;
+            switch (dataVal & 0xc)
+            {
+            case 0x4:	// wall
+                switch (dataVal & 0x3)
+                {
+                case 0:
+                    // put block to west
+                    block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                    break;
+                case 1:
+                    // put block to north
+                    block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                    break;
+                case 2:
+                    // put block to east
+                    block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                    break;
+                case 3:
+                    // put block to south
+                    block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                    break;
+                }
+                break;
+            case 0x8:	// ceiling
+                // put block above
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            default:	// floor
+                // do nothing - on ground
+                break;
+            }
+        }
+        break;
+    case BLOCK_LANTERN:
+        // uses lowest bit 0 for hanging, 1 for soul lantern, plus waterlogging
+        // won't show all lanterns - I'll live with that
+        addBlock = 1;
+        if (dataVal & 0x1) {
+            // put block above lantern
+            block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+        }
+        finalDataVal = (dataVal & 0x3) | ((dataVal >= 4) ? WATERLOGGED_BIT : 0);
+        break;
+    case BLOCK_SCAFFOLDING:
+        // uses only bit 0, but put three of them up, and waterlog
+        if (dataVal < 4)
+        {
+            addBlock = 1;
+            // put block above
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = BLOCK_SCAFFOLDING & 0xff;
+            block->data[bi] = (unsigned short)TYPE_PROMOTE_256;
+            // put block to south, above, floating
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 5 + (dataVal % 2) * 8);
+            block->grid[bi] = BLOCK_SCAFFOLDING & 0xff;
+            block->data[bi] = (unsigned short)(TYPE_PROMOTE_256 | 0x1);
+            finalDataVal = (dataVal % 2) | ((dataVal >= 2) ? WATERLOGGED_BIT : 0);
+        }
+        break;
+    case BLOCK_BEE_NEST:
+        addBlock = 1;
+        // use BIT_32 on or off (beehive/bee_nest), honey_level 5 or 0, facing 0 1 2 3
+        finalDataVal = 0x80 | ((dataVal & 0x8) ? BIT_32 : 0) |	// beehive / bee_nest
+            ((dataVal & 0x4) ? 5 << 2 : 0) |	// honey level
+            (dataVal & 0x3);	// facing
+        break;
+
+    case BLOCK_BIG_DRIPLEAF:
+        // facing, and put one above a stem
+        addBlock = 1;
+        // put dripleaf above, stem below
+        bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+        block->grid[bi] = BLOCK_BIG_DRIPLEAF & 0xff;
+        // tilt, and facing
+        block->data[bi] = (unsigned short)(TYPE_PROMOTE_256 | (dataVal << 1));
+        // stem uses facing
+        finalDataVal = ((dataVal & 0x3) << 1) | 0x1;
+        break;
+
+    case BLOCK_SMALL_DRIPLEAF:
+        if (dataVal < 4) {
+            // facing, and upper/lower half
+            addBlock = 1;
+            // put dripleaf above, stem below
+            bi = BLOCK_INDEX(4 + (type % 2) * 8, y + 1, 4 + (dataVal % 2) * 8);
+            block->grid[bi] = BLOCK_SMALL_DRIPLEAF & 0xff;
+            // facing
+            block->data[bi] = (unsigned short)(TYPE_PROMOTE_256 | (dataVal << 1));
+            // stem uses facing
+            finalDataVal = ((dataVal & 0x3) << 1) | 0x1;
+        }
+        break;
+
+        // don't add anything for these "high_bit" reserved spots
+    case BLOCK_RESERVED_FLOWER_POT:
+    case BLOCK_RESERVED_MOB_HEAD:
+        break;
+
+    case BLOCK_FROGLIGHT:
+        // uses 0-11, but without 0x3 versions (which is nothing)
+        if (dataVal < 12 && (dataVal % 4) != 3)
+        {
+            addBlock = 1;
+        }
+        break;
+
+    case BLOCK_OAK_WALL_HANGING_SIGN:
+        // 0-11 x 4 + 0-3 => 0-43
+    {
+        addBlock = 1;
+        addDiagonalBlocksToMap(48, y, type, dataVal, finalDataVal, typeHighBit, block);
+    }
+    break;
+    case BLOCK_OAK_HANGING_SIGN:
+    case BLOCK_BIRCH_HANGING_SIGN:
+    case BLOCK_ACACIA_HANGING_SIGN:
+    case BLOCK_CRIMSON_HANGING_SIGN:
+    case BLOCK_MANGROVE_HANGING_SIGN:
+    case BLOCK_BAMBOO_HANGING_SIGN:
+        // 0-64,
+        // add new style diagonally SE of original
+        {
+            addBlock = 1;
+            addDiagonalBlocksToMap(64, y, type, dataVal, finalDataVal, typeHighBit, block);
+        }
+        break;
+    case BLOCK_CRAFTER:
+        // uses bits 0-11, with variations to show other styles
+        // This is for when adding content with the TYPE_HIGH_BIT1 set
+        if (dataVal < 12) {
+            addBlock = 1;
+
+            // add new style diagonally SE of original
+            neighborIndex = BLOCK_INDEX(5 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned char)finalDataVal | BIT_16 | TYPE_PROMOTE_256;
+
+            neighborIndex = BLOCK_INDEX(6 + (type % 2) * 8, y, 6 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned char)finalDataVal | BIT_32 | TYPE_PROMOTE_256;
+
+            neighborIndex = BLOCK_INDEX(7 + (type % 2) * 8, y, 7 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned char)finalDataVal | BIT_32 | BIT_16 | TYPE_PROMOTE_256;
+        }
+        break;
+    case BLOCK_COPPER_BULB:
+        // 0-32, to catch two top bits
+        {
+            addBlock = 1;
+
+            neighborIndex = BLOCK_INDEX(5 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned char)finalDataVal | BIT_16 | TYPE_PROMOTE_256;
+        }
+        break;
+
+    case BLOCK_COPPER_GOLEM_STATUE:
+    case BLOCK_WAXED_COPPER_GOLEM_STATUE:
+        // dataVal layout: facing(0x03) | pose(0x0C) | oxidation(0x30) | waterlogged(0x40).
+        // Test world iterates input dataVal 0..15; map low 2 bits to oxidation, high 2 bits to
+        // pose, with facing=south=0 and no waterlog. For input dataVal 0, also seed a couple
+        // of neighbor cells with facing/waterlogged variants so the property arms get exercised.
+        {
+            int oxidation = dataVal & 0x3;
+            int pose = (dataVal >> 2) & 0x3;
+            finalDataVal = (oxidation << 4) | (pose << 2);
+            addBlock = 1;
+
+            // east-facing variant, no waterlog
+            // TODOTODO - add more variants, but this is just for testing quickly
+            neighborIndex = BLOCK_INDEX(5 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned short)(0x01 | finalDataVal | TYPE_PROMOTE_256);
+            // standing + waterlogged variant
+            neighborIndex = BLOCK_INDEX(6 + (type % 2) * 8, y, 6 + (dataVal % 2) * 8);
+            block->grid[neighborIndex] = (unsigned char)type;
+            block->data[neighborIndex] = (unsigned short)(finalDataVal | WATERLOGGED_BIT | TYPE_PROMOTE_256);
+        }
+        break;
+
+    case BLOCK_STONE_PRESSURE_PLATE: // now has 26 states
+		// 0-25
+	    {
+		    // always add the block, since we know we're above 16
+		    addBlock = 1;
+            addDiagonalBlocksToMap(26, y, type, dataVal, finalDataVal, typeHighBit, block);
+        }
+        break;
+
+    case BLOCK_STONE:
+        // 0-16
+        {
+            // always add the block, since we know we're above 16
+            addBlock = 1;
+            addDiagonalBlocksToMap(25, y, type, dataVal, finalDataVal, typeHighBit, block);
+        }
+        break;
+
+    case BLOCK_CREAKING_HEART:
+        // 0-3,4-6,8-10 - could add the pale oak logs for effect, but this is just for testing
+        if (dataVal <= 2 || dataVal == 4 || dataVal == 5 || dataVal == 6 || dataVal == 8 || dataVal == 9 || dataVal == 10) {
+            addBlock = 1;
+        }
+        break;
+
+    case BLOCK_PALE_MOSS_CARPET:
+        // 0,1,2+32 to 15+32 (could go higher)
+        addBlock = 1;
+        if (dataVal > 1) {
+            // note there could be low (or tall) plants, and always have a bottom
+            finalDataVal = (BIT_32 + dataVal) | 0x1;
+            if ((dataVal & 0x1) == 0x0) {
+                // mask off "tall" bits so short walls appear
+                finalDataVal &= (BIT_32 | 0x1);
+            }
+            // put moss block next to each side needed
+            if (dataVal & 0x2) {
+                // put moss block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = (unsigned char)(BLOCK_AMETHYST & 0xff);
+                block->data[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = TYPE_PROMOTE_256 | 60;
+            }
+            if (dataVal & 0x4) {
+                // put moss block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = (unsigned char)(BLOCK_AMETHYST & 0xff);
+                block->data[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = TYPE_PROMOTE_256 | 60;
+            }
+            if (dataVal & 0x8) {
+                // put moss block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = (unsigned char)(BLOCK_AMETHYST & 0xff);
+                block->data[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = TYPE_PROMOTE_256 | 60;
+            }
+            // currently not done
+            if (dataVal & 0x10) {
+                // put moss block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = (unsigned char)(BLOCK_AMETHYST & 0xff);
+                block->data[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = TYPE_PROMOTE_256 | 60;
+            }
+        }
+        break;
+
+    case BLOCK_DRIED_GHAST:
+        // uses 0-31
+        addBlock = 1;
+        finalDataVal = (dataVal & 0xF);
+        // waterlogged
+        neighborIndex = BLOCK_INDEX(5 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8);
+        block->grid[neighborIndex] = (unsigned char)(type & 0xff);
+        block->data[neighborIndex] = TYPE_PROMOTE_256 | (unsigned char)finalDataVal | WATERLOGGED_BIT;
+        break;
+
+    case BLOCK_ACACIA_SHELF:
+    case BLOCK_PALE_OAK_SHELF:
+        // there are 8 materials for acacia shelves and 4 for pale oak shelves. Rather than going absolutely nuts, we change the dataVal for each.
+        // directions are 2-5, so allow those and 10-13
+        addBlock = 1;
+        // set higher bits BIT_8 and BIT_16
+        if (origType == BLOCK_ACACIA_SHELF) {
+            // cycle 8 materials, alternate powered
+            finalDataVal = (((dataVal/2) % 8) << 3) | (dataVal & 0x3) | ((dataVal & 0x1) << 2);
+        }
+        else {
+            // cycle 4 materials, alternate powered
+            finalDataVal = (((dataVal/4) % 4) << 3) | (dataVal & 0x3) | ((dataVal & 0x1) << 2);
+        }
+
+        // for first 4, show with extra block, so it looks mounted
+        if (dataVal < 4) {
+            switch (dataVal & 0x3)
+            {
+            default:
+                assert(0);
+            case 3:
+                // put block to south
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 5 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 1:
+                // put block to north
+                block->grid[BLOCK_INDEX(4 + (type % 2) * 8, y, 3 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 2:
+                // put block to east
+                block->grid[BLOCK_INDEX(5 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            case 0:
+                // put block to west
+                block->grid[BLOCK_INDEX(3 + (type % 2) * 8, y, 4 + (dataVal % 2) * 8)] = BLOCK_STONE;
+                break;
+            }
+        }
+        break;
+
+        // don't show special blocks to users
+#ifndef _DEBUG
+    case BLOCK_UNKNOWN:
+    case BLOCK_FAKE:
+        break;
+#endif
+    }
+
+    // if we want to do a normal sort of thing
+    if (addBlock)
+    {
+        finalDataVal |= typeHighBit;
+        bi = BLOCK_INDEX(4 + (origType % 2) * 8, y, 4 + (dataVal % 2) * 8);
+        block->grid[bi] = (unsigned char)type;
+        block->data[bi] = (unsigned short)finalDataVal;
+#ifdef _DEBUG
+        static bool extraBlock = false;
+        if (extraBlock)
+        {
+            // optional: put neighbor to south, so we can test for what happens at borders when splitting occurs;
+            // note: this will generate two assertions with pistons. Ignore them.
+            bi = BLOCK_INDEX(4 + (origType % 2) * 8, y, 5 + (dataVal % 2) * 8);
+            block->grid[bi] = (unsigned char)type;
+            block->data[bi] = (unsigned short)finalDataVal;
+        }
+#endif
+    }
+}   // endend
+void testNumeral(WorldBlock* block, int type, int y, int digitPlace, int outType)
+{
+    int i;
+    int shiftedNumeral = type;
+    int numeral;
+
+    i = digitPlace;
+    while (i > 0)
+    {
+        shiftedNumeral /= 10;
+        i--;
+    }
+    numeral = shiftedNumeral % 10;
+    if ((type < NUM_BLOCKS_DEFINED) && shiftedNumeral > 0)
+    {
+        int dots[50][2];
+        int doti = 0;
+        switch (numeral)
+        {
+        default:
+        case 0:
+            dots[doti][0] = 1; dots[doti++][1] = 0;
+            dots[doti][0] = 2; dots[doti++][1] = 0;
+            dots[doti][0] = 0; dots[doti++][1] = 1;
+            dots[doti][0] = 3; dots[doti++][1] = 1;
+            dots[doti][0] = 0; dots[doti++][1] = 2;
+            dots[doti][0] = 3; dots[doti++][1] = 2;
+            dots[doti][0] = 0; dots[doti++][1] = 3;
+            dots[doti][0] = 3; dots[doti++][1] = 3;
+            dots[doti][0] = 0; dots[doti++][1] = 4;
+            dots[doti][0] = 3; dots[doti++][1] = 4;
+            dots[doti][0] = 1; dots[doti++][1] = 5;
+            dots[doti][0] = 2; dots[doti++][1] = 5;
+            break;
+        case 1:
+            dots[doti][0] = 1; dots[doti++][1] = 0;
+            dots[doti][0] = 2; dots[doti++][1] = 0;
+            dots[doti][0] = 3; dots[doti++][1] = 0;
+            dots[doti][0] = 2; dots[doti++][1] = 1;
+            dots[doti][0] = 2; dots[doti++][1] = 2;
+            dots[doti][0] = 2; dots[doti++][1] = 3;
+            dots[doti][0] = 1; dots[doti++][1] = 4;
+            dots[doti][0] = 2; dots[doti++][1] = 4;
+            dots[doti][0] = 2; dots[doti++][1] = 5;
+            break;
+        case 2:
+            dots[doti][0] = 0; dots[doti++][1] = 0;
+            dots[doti][0] = 1; dots[doti++][1] = 0;
+            dots[doti][0] = 2; dots[doti++][1] = 0;
+            dots[doti][0] = 3; dots[doti++][1] = 0;
+            dots[doti][0] = 1; dots[doti++][1] = 1;
+            dots[doti][0] = 2; dots[doti++][1] = 2;
+            dots[doti][0] = 3; dots[doti++][1] = 3;
+            dots[doti][0] = 0; dots[doti++][1] = 4;
+            dots[doti][0] = 3; dots[doti++][1] = 4;
+            dots[doti][0] = 1; dots[doti++][1] = 5;
+            dots[doti][0] = 2; dots[doti++][1] = 5;
+            break;
+        case 3:
+            dots[doti][0] = 1; dots[doti++][1] = 0;
+            dots[doti][0] = 2; dots[doti++][1] = 0;
+            dots[doti][0] = 0; dots[doti++][1] = 1;
+            dots[doti][0] = 3; dots[doti++][1] = 1;
+            dots[doti][0] = 3; dots[doti++][1] = 2;
+            dots[doti][0] = 1; dots[doti++][1] = 3;
+            dots[doti][0] = 2; dots[doti++][1] = 3;
+            dots[doti][0] = 3; dots[doti++][1] = 4;
+            dots[doti][0] = 0; dots[doti++][1] = 5;
+            dots[doti][0] = 1; dots[doti++][1] = 5;
+            dots[doti][0] = 2; dots[doti++][1] = 5;
+            break;
+        case 4:
+            dots[doti][0] = 3; dots[doti++][1] = 0;
+            dots[doti][0] = 3; dots[doti++][1] = 1;
+            dots[doti][0] = 3; dots[doti++][1] = 2;
+            dots[doti][0] = 3; dots[doti++][1] = 3;
+            dots[doti][0] = 3; dots[doti++][1] = 4;
+            dots[doti][0] = 3; dots[doti++][1] = 5;
+            dots[doti][0] = 0; dots[doti++][1] = 2;
+            dots[doti][0] = 1; dots[doti++][1] = 2;
+            dots[doti][0] = 2; dots[doti++][1] = 2;
+            dots[doti][0] = 4; dots[doti++][1] = 2;
+            dots[doti][0] = 1; dots[doti++][1] = 3;
+            dots[doti][0] = 2; dots[doti++][1] = 4;
+            break;
+        case 5:
+            dots[doti][0] = 1; dots[doti++][1] = 0;
+            dots[doti][0] = 2; dots[doti++][1] = 0;
+            dots[doti][0] = 0; dots[doti++][1] = 1;
+            dots[doti][0] = 3; dots[doti++][1] = 1;
+            dots[doti][0] = 3; dots[doti++][1] = 2;
+            dots[doti][0] = 0; dots[doti++][1] = 3;
+            dots[doti][0] = 1; dots[doti++][1] = 3;
+            dots[doti][0] = 2; dots[doti++][1] = 3;
+            dots[doti][0] = 0; dots[doti++][1] = 4;
+            dots[doti][0] = 0; dots[doti++][1] = 5;
+            dots[doti][0] = 1; dots[doti++][1] = 5;
+            dots[doti][0] = 2; dots[doti++][1] = 5;
+            dots[doti][0] = 3; dots[doti++][1] = 5;
+            break;
+        case 6:
+            dots[doti][0] = 1; dots[doti++][1] = 0;
+            dots[doti][0] = 2; dots[doti++][1] = 0;
+            dots[doti][0] = 0; dots[doti++][1] = 1;
+            dots[doti][0] = 3; dots[doti++][1] = 1;
+            dots[doti][0] = 0; dots[doti++][1] = 2;
+            dots[doti][0] = 3; dots[doti++][1] = 2;
+            dots[doti][0] = 0; dots[doti++][1] = 3;
+            dots[doti][0] = 1; dots[doti++][1] = 3;
+            dots[doti][0] = 2; dots[doti++][1] = 3;
+            dots[doti][0] = 0; dots[doti++][1] = 4;
+            dots[doti][0] = 1; dots[doti++][1] = 5;
+            dots[doti][0] = 2; dots[doti++][1] = 5;
+            dots[doti][0] = 3; dots[doti++][1] = 5;
+            break;
+        case 7:
+            dots[doti][0] = 1; dots[doti++][1] = 0;
+            dots[doti][0] = 1; dots[doti++][1] = 1;
+            dots[doti][0] = 1; dots[doti++][1] = 2;
+            dots[doti][0] = 2; dots[doti++][1] = 3;
+            dots[doti][0] = 3; dots[doti++][1] = 4;
+            dots[doti][0] = 0; dots[doti++][1] = 5;
+            dots[doti][0] = 1; dots[doti++][1] = 5;
+            dots[doti][0] = 2; dots[doti++][1] = 5;
+            dots[doti][0] = 3; dots[doti++][1] = 5;
+            break;
+        case 8:
+            dots[doti][0] = 1; dots[doti++][1] = 0;
+            dots[doti][0] = 2; dots[doti++][1] = 0;
+            dots[doti][0] = 0; dots[doti++][1] = 1;
+            dots[doti][0] = 3; dots[doti++][1] = 1;
+            dots[doti][0] = 0; dots[doti++][1] = 2;
+            dots[doti][0] = 3; dots[doti++][1] = 2;
+            dots[doti][0] = 1; dots[doti++][1] = 3;
+            dots[doti][0] = 2; dots[doti++][1] = 3;
+            dots[doti][0] = 0; dots[doti++][1] = 4;
+            dots[doti][0] = 3; dots[doti++][1] = 4;
+            dots[doti][0] = 1; dots[doti++][1] = 5;
+            dots[doti][0] = 2; dots[doti++][1] = 5;
+            break;
+        case 9:
+            dots[doti][0] = 1; dots[doti++][1] = 0;
+            dots[doti][0] = 2; dots[doti++][1] = 0;
+            dots[doti][0] = 0; dots[doti++][1] = 1;
+            dots[doti][0] = 3; dots[doti++][1] = 1;
+            dots[doti][0] = 3; dots[doti++][1] = 2;
+            dots[doti][0] = 1; dots[doti++][1] = 3;
+            dots[doti][0] = 2; dots[doti++][1] = 3;
+            dots[doti][0] = 3; dots[doti++][1] = 3;
+            dots[doti][0] = 0; dots[doti++][1] = 4;
+            dots[doti][0] = 3; dots[doti++][1] = 4;
+            dots[doti][0] = 1; dots[doti++][1] = 5;
+            dots[doti][0] = 2; dots[doti++][1] = 5;
+            break;
+        }
+        for (i = 0; i < doti; i++)
+        {
+            block->grid[BLOCK_INDEX(2 + dots[i][0] + (type % 2) * 8, y - 1, 6 - dots[i][1] + ((digitPlace + 1) % 2) * 8)] = (unsigned char)outType;
+        }
+    }
+}
+WorldBlock* LoadBlock(WorldGuide* pWorldGuide, int cx, int cz, int mcVersion, int versionID, int& retCode)
+{
+    // return negative value on error, 1 on read OK, 2 on read and it's empty, and higher bits than 1 or 2 are warnings
+    retCode = 0;
+
+    // if there's no world, simply return
+    if (pWorldGuide->type == WORLD_UNLOADED_TYPE)
+        return NULL;
+
+    // don't get a block for the synthetic world if it's not going to be populated
+    if (pWorldGuide->type == WORLD_TEST_BLOCK_TYPE) {
+        if (!(cx >= 0 && cx * 2 < NUM_BLOCKS_DEFINED && cz >= -3 && cz <= 8)) {
+            return NULL;
+        }
+    }
+
+    // WorldBlock* block = block_alloc(MAX_ARRAY_HEIGHT(versionID, mcVersion));
+    WorldBlock* block;
+    if (pWorldGuide->type == WORLD_SCHEMATIC_TYPE) {
+        block = block_alloc(0, pWorldGuide->sch.height-1);
+    } else {
+        block = block_alloc(pWorldGuide->minHeight, pWorldGuide->maxHeight);
+    }
+
+    // out of memory? If so, clear cache and cross fingers
+    if (block == NULL)
+    {
+        Cache_Empty();
+        //block = block_alloc(MAX_ARRAY_HEIGHT(versionID, mcVersion));
+        block = block_alloc(pWorldGuide->minHeight, pWorldGuide->maxHeight);
+        if (block == NULL) {
+            // oh well, out of luck
+            return NULL;
+        }
+    }
+    // always set
+    block->rendery = -1; // force redraw
+    block->mcVersion = mcVersion;
+    block->versionID = versionID;
+    // this version of 1.17 beta went to a height of 384;
+    // now is set above in block_alloc(): block->maxHeight = (versionID >= 2685) ? 384 : 256;
+
+    if (pWorldGuide->type == WORLD_TEST_BLOCK_TYPE)
+    {
+        // synthetic world we populate - no need to go nuts here
+        int type = cx * 2;
+        // if directory starts with /, this is [Block Test World], a synthetic test world
+        // made by the testBlock() method.
+        int x, z;
+        //int yoff = -ZERO_WORLD_HEIGHT(versionID, mcVersion);
+        int yoff = -block->minHeight;
+        int bedrockHeight = 60 + yoff;      // cppcheck-suppress 398
+        int grassHeight = 62 + yoff;
+        int blockHeight = 63 + yoff;
+
+        // really, we should not need to go higher than this, 14 blocks above the surface; if we do, just kick this up
+        // - higher is just more inefficient
+        block->maxFilledSectionHeight = 79 + yoff;
+
+        memset(block->grid, 0, 16 * 16 * block->heightAlloc);
+        memset(block->data, 0, 16 * 16 * block->heightAlloc);
+        memset(block->biome, 1, 16 * 16);
+        memset(block->light, 0xff, 16 * 16 * block->heightAlloc/2);
+        block->renderhilitID = 0;
+
+        if (type >= 0 && type < NUM_BLOCKS_DEFINED && cz >= 0 && cz < 8)
+        {
+            // grass base
+            for (x = 0; x < 16; x++)
+            {
+                for (z = 0; z < 16; z++)
+                {
+                    // make the grass two blocks thick, and then "impenetrable" below, for test border code
+                    block->grid[BLOCK_INDEX(x, bedrockHeight, z)] = BLOCK_BEDROCK;
+                    for (int y = bedrockHeight + 1; y < grassHeight; y++)
+                        block->grid[BLOCK_INDEX(x, y, z)] = BLOCK_DIRT;
+                    block->grid[BLOCK_INDEX(x, grassHeight, z)] = BLOCK_GRASS_BLOCK;
+                }
+            }
+
+            // blocks: each 16x16 area has 4 blocks, every 8 spaces, so we call this to get 4 blocks.
+            testBlock(block, type, blockHeight, cz * 2);
+            testBlock(block, type, blockHeight, cz * 2 + 1);
+            if (type + 1 < NUM_BLOCKS_DEFINED)
+            {
+                testBlock(block, type + 1, blockHeight, cz * 2);
+                testBlock(block, type + 1, blockHeight, cz * 2 + 1);
+            }
+            return determineMaxFilledHeight(block);
+        }
+        // tick marks
+        else if (type >= 0 && type < NUM_BLOCKS_DEFINED && (cz == -1 || cz == 8))
+        {
+            int i, j;
+
+            // stone edge
+            for (x = 0; x < 16; x++)
+            {
+                for (z = 0; z < 16; z++)
+                {
+                    block->grid[BLOCK_INDEX(x, grassHeight, z)] = (cz > 0) ? (unsigned char)BLOCK_OAK_PLANKS : (unsigned char)BLOCK_STONE;
+                }
+            }
+
+            // blocks
+            for (i = 0; i < 2; i++)
+            {
+                if (((type + i) % 10) == 0)
+                {
+                    if (type + i < NUM_BLOCKS_DEFINED)
+                    {
+                        for (j = 0; j <= (int)(cx / 8); j++)
+                            block->grid[BLOCK_INDEX(4 + (i % 2) * 8, grassHeight, j)] = (((type + i) % 50) == 0) ? (unsigned char)BLOCK_WATER : (unsigned char)BLOCK_LAVA;
+                    }
+                }
+            }
+            return determineMaxFilledHeight(block);
+        }
+        // numbers (yes, I'm insane)
+        else if (type >= 0 && type < NUM_BLOCKS_DEFINED && (cz <= -2 && cz >= -3))
+        {
+            int letterType = BLOCK_OBSIDIAN;
+            if ((type >= NUM_BLOCKS_STANDARD) && (type != BLOCK_STRUCTURE_BLOCK))
+            {
+                // for unknown block, put a different font
+                letterType = BLOCK_LAVA;
+            }
+
+            // white wool
+            for (x = 0; x < 16; x++)
+            {
+                for (z = 0; z < 16; z++)
+                {
+                    block->grid[BLOCK_INDEX(x, grassHeight, z)] = BLOCK_WOOL;
+                }
+            }
+            // blocks
+            testNumeral(block, type, blockHeight, -cz * 2 - 3, letterType);
+            testNumeral(block, type, blockHeight, -cz * 2 - 1 - 3, letterType);
+
+            // second number on 16x16 tile
+            letterType = BLOCK_OBSIDIAN;
+            if (type + 1 < NUM_BLOCKS_DEFINED)
+            {
+                if ((type + 1 >= NUM_BLOCKS_STANDARD) && (type + 1 != BLOCK_STRUCTURE_BLOCK))
+                {
+                    letterType = BLOCK_LAVA;
+                }
+                testNumeral(block, type + 1, blockHeight, -cz * 2 - 3, letterType);
+                testNumeral(block, type + 1, blockHeight, -cz * 2 - 1 - 3, letterType);
+            }
+            return determineMaxFilledHeight(block);
+        }
+        else
+        {
+            block_free(block);
+            return NULL;
+        }
+    }
+    else {
+        // it's a real world or schematic or no world is loaded
+        if (pWorldGuide->type == WORLD_LEVEL_TYPE) {
+            // absolute insanely high maximum, just in case - 384 is fine here, just to be safe, since it's temporary storage
+            // Well, I guess this could go bad if the heights are way larger, due to a data pack?
+            BlockEntity blockEntities[NUM_BLOCK_ENTITIES];
+
+            // Given coordinates, check if the file for that location exists, data for the chunk exists, and populate the block.
+            // Return 
+            retCode = regionGetBlocks(pWorldGuide->directory, cx, cz, block->grid, block->data, block->light, block->biome, blockEntities, &block->numEntities, block->mcVersion, block->minHeight, block->maxHeight, block->maxFilledSectionHeight, gUnknownBlockName, gUnknownBlockID);
+            assert(block->numEntities <= 384);  // if higher, the allocation above needs to change!
+
+            if (retCode == ERROR_INFLATE) {
+                block->blockType = retCode;
+                return NULL;
+            }
+
+            // values 1 and 2 are valid; 3's not used - higher bits are warnings; see nbt.h
+            if (retCode >= NBT_VALID_BUT_EMPTY) {
+                block->blockType = retCode & 0x3;
+
+                // for old-style chunks, there may be tile entities, such as flower and head types, which need to get transferred and used later
+                if ((retCode == NBT_VALID_BLOCK) && (block->numEntities > 0)) {
+                    // transfer the relevant part of the BlockEntity array to permanent block storage
+                    block->entities = (BlockEntity*)malloc(block->numEntities * sizeof(BlockEntity));
+
+                    if (block->entities)
+                        memcpy(block->entities, blockEntities, block->numEntities * sizeof(BlockEntity));
+                    else
+                        // couldn't alloc data
+                        return NULL;
+                }
+            }
+            else {
+                // negative means a serious read error, so store as-is
+                block->blockType = retCode;
+            }
+        }
+        else {
+            assert(pWorldGuide->type == WORLD_SCHEMATIC_TYPE);
+            retCode = block->blockType = createBlockFromSchematic(pWorldGuide, cx, cz, block);
+        }
+
+        // does block have anything in it other than air?
+        // Note that NBT_NO_SECTIONS blocks will not go in here and be freed at the end.
+        if (block->blockType == NBT_VALID_BLOCK) {
+            int i;
+            // TODO someday: we could actually free the block, but the logic's a bit tricky. Leaving it be, since it works.
+            determineMaxFilledHeight(block);
+
+            // look for unknown blocks and recover
+            unsigned char* pBlockID = block->grid;
+            for (i = 0; i < 16 * 16 * (block->maxFilledHeight+1); i++, pBlockID++)
+            {
+                assert((i >> 8) <= block->maxFilledHeight);
+                if ((*pBlockID >= NUM_BLOCKS_STANDARD) && (*pBlockID != BLOCK_STRUCTURE_BLOCK))
+                {
+                    // some new version of Minecraft, block ID is unrecognized;
+                    // turn this block into stone. dataVal will be ignored.
+                    // flag assert only once
+                    assert((gUnknownBlock == 1) || (gPerformUnknownBlockCheck == 0));	// note the program needs fixing
+                    *pBlockID = BLOCK_UNKNOWN;
+                    // note that we always clean up bad blocks;
+                    // whether we flag that a bad block was found is optional.
+                    // This gets turned off once the user has been warned, once, that his map has some funky data.
+                    if (gPerformUnknownBlockCheck)
+                        gUnknownBlock = 1;
+                }
+            }
+            return block;
+        }
+    }
+
+    block_free(block);
+    return NULL;
+}
+static WorldBlock* determineMaxFilledHeight(WorldBlock* block)
+{
+    int i;
+    bool searchMaxHeight = true;
+    if (block->maxFilledSectionHeight <= EMPTY_MAX_HEIGHT) {
+        // the maxFilledSectionHeight should have been set before calling this method!
+        assert(0);
+        block->maxFilledSectionHeight = block->heightAlloc - 1;
+    }
+    unsigned char* pBlockID = block->grid + 16 * 16 * (block->maxFilledSectionHeight+1) - 1;
+    for (i = 16 * 16 * (block->maxFilledSectionHeight + 1) - 1; i >= 0 && searchMaxHeight; i--, pBlockID--)
+    {
+        // find first filled block
+        if (*pBlockID) {
+            block->maxFilledHeight = i >> 8;
+            searchMaxHeight = false;
+        }
+    }
+    if (block->maxFilledHeight < 0) {
+        block->blockType = 2;   // means empty
+        //return NULL;
+    }
+
+    // and, realloc, if set to minimize memory
+    block_realloc(block);
+
+    return block;
+
+}
+int createBlockFromSchematic(WorldGuide* pWorldGuide, int cx, int cz, WorldBlock* block)
+{
+    if (!pWorldGuide->sch.repeat) {
+        // does block overlap the schematic?
+        if ((cx * 16 > pWorldGuide->sch.width) || (cx < 0))
+            return 0;
+        if ((cz * 16 > pWorldGuide->sch.length) || (cz < 0))
+            return 0;
+    }
+
+    // no biome, so that's easy
+    memset(block->biome, 0, 16 * 16);
+    // no light, so that's also easy
+    memset(block->light, 0, 16 * 16 * block->heightAlloc/2);
+
+    // clear the rest, so we fill these in as found
+    memset(block->grid, 0, 16 * 16 * block->heightAlloc);
+    memset(block->data, 0, 16 * 16 * block->heightAlloc * sizeof(unsigned short));
+
+    block->maxFilledSectionHeight = block->maxFilledHeight = pWorldGuide->sch.height - 1;
+
+    // not sure why I made this a static int, but let's leave it be, shall we?
+    static int border = 1;      // cppcheck-suppress 398
+    if (pWorldGuide->sch.repeat) {
+        // loop through local block locations, 0-15,0-15
+        for (int y = 0; y < pWorldGuide->sch.height; y++) {
+            int zWorld = cz * 16;
+            for (int z = 0; z < 16; z++, zWorld++) {
+                int zMod = zWorld % (pWorldGuide->sch.length + border);
+                zMod = (zMod + pWorldGuide->sch.length + border) % (pWorldGuide->sch.length + border);
+                // leave a border
+                if (zMod < pWorldGuide->sch.length) {
+                    int index = (y * 16 + z) * 16;
+                    int xWorld = cx * 16;
+                    for (int x = 0; x < 16; x++, index++, xWorld++) {
+                        int xMod = xWorld % (pWorldGuide->sch.width + border);
+                        xMod = (xMod + pWorldGuide->sch.width + border) % (pWorldGuide->sch.width + border);
+                        if (xMod < pWorldGuide->sch.width) {
+                            int schIndex = (y * pWorldGuide->sch.length + zMod) * pWorldGuide->sch.width + xMod;
+                            assert(schIndex >= 0 && schIndex < pWorldGuide->sch.numBlocks);
+                            block->grid[index] = pWorldGuide->sch.blocks[schIndex];
+                            block->data[index] = pWorldGuide->sch.data[schIndex];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else {
+        // find the valid data's bounds inside the 16x16 area
+        int xlength = (cx * 16 + 16 > pWorldGuide->sch.width) ? pWorldGuide->sch.width - cx * 16 : 16;
+        int ylength = pWorldGuide->sch.height;
+        int zlength = (cz * 16 + 16 > pWorldGuide->sch.length) ? pWorldGuide->sch.length - cz * 16 : 16;
+        // the offset is how many 16x16 tiles into the schematic data itself we need to offset
+        int offset = 16 * cz * pWorldGuide->sch.width + 16 * cx;
+
+        // loop through local block locations, 0-15,0-15
+        for (int y = 0; y < ylength; y++) {
+            for (int z = 0; z < zlength; z++) {
+                int index = (y * 16 + z) * 16;
+                int schIndex = (y * pWorldGuide->sch.length + z) * pWorldGuide->sch.width + offset;
+                assert(schIndex >= 0 && schIndex < pWorldGuide->sch.numBlocks);
+                for (int x = 0; x < xlength; x++, index++, schIndex++) {
+
+                    // TODO: we could test if the block is entirely empty, marking blockType == 2 if so. Common in schematics, and would draw faster.
+                    block->grid[index] = pWorldGuide->sch.blocks[schIndex];
+                    block->data[index] = pWorldGuide->sch.data[schIndex];
+                }
+            }
+        }
+    }
+    return 1;
+}
+static struct {
+    char* name;
+} gCoralNames[] = {
+    { "Tube" },
+    { "Brain" },
+    { "Bubble" },
+    { "Fire" },
+    { "Horn" },
+};
+
+// 以下定义按 MinewaysMap.cpp 原样抽取（gColorNames 用于 RetrieveBlockSubname 的染色方块/蜡烛命名）
+char gConcatString[100];
+
+static struct {
+    char* name;
+} gColorNames[] = {
+    { "White" },
+    { "Orange" },
+    { "Magenta" },
+    { "Light" },
+    { "Yellow" },
+    { "Lime" },
+    { "Pink" },
+    { "Gray" },
+    { "Light" },
+    { "Cyan" },
+    { "Purple" },
+    { "Blue" },
+    { "Brown" },
+    { "Green" },
+    { "Red" },
+    { "Black" }
+};
+
+const char* RetrieveBlockSubname(int type, int dataVal) // , WorldBlock* block), int xoff, int y, int zoff)
+{
+    ///////////////////////////////////
+    // give a better name if possible
+    switch (type)
+    {
+    case BLOCK_LEAVES:
+        // some upper bit is used in the old 1.12 and earlier format, beats me what.
+        switch (dataVal & 0x3)
+        {
+        default:
+            // can hit here due to some weird old data == 7 in Voxelia
+            assert(0);
+            break;
+        case 0:
+            break; //return concatStrings(OAK_NAME, LEAVES_NAME);
+        case 1:	// spruce
+            return "Spruce Leaves";
+        case 2:	// birch
+            return "Birch Leaves";
+        case 3:	// jungle
+            return "Jungle Leaves";
+        }
+        break;
+
+    case BLOCK_AD_LEAVES:
+        switch (dataVal & 0x3)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break; //return concatStrings(ACACIA_NAME, LEAVES_NAME);
+        case 1:	// dark oak
+            return "Dark Oak Leaves";
+        case 2:	//
+            return "Azalea Leaves";
+        case 3:	//
+            return "Flowering Azalea Leaves";
+        }
+        break;
+
+    case BLOCK_GRASS:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+            break;
+        case 0: // dead bush
+            // left for backward compatibility, I think it was called this long ago
+            // (in Bedrock it's "Fern", though) https://minecraft.wiki/w/Grass#Block_states
+            return "Dead Bush";
+        case 1:	// tall grass - really, the default name is Grass, but now Short Grass as of 1.20.3
+            break; // return "TALL_GRASS";
+        case 2:	// fern
+            return "Fern";
+        case 3:
+            return "Nether Sprouts";
+        case 4:
+            return "Crimson Roots";
+        case 5:
+            return "Warped Roots";
+        case 6:
+            return "Bush";
+        case 7:	// cactus_flower
+            return "Cactus Flower";
+        case 8:	// short_dry_grass
+            return "Short Dry Grass";
+        case 9:	// tall_dry_grass
+            return "Tall Dry Grass";
+        case 10:	// firefly_bush
+            return "Firefly Bush";
+        }
+        break;
+
+    case BLOCK_WOOL:
+    case BLOCK_STAINED_GLASS:
+    case BLOCK_STAINED_GLASS_PANE:
+    case BLOCK_CONCRETE:
+    case BLOCK_CONCRETE_POWDER:
+        // someday, when I add beds with colors: case BLOCK_BED - and we'll probably need to shift the data value, since the lower bits are used for top/bottom etc.
+        sprintf_s(gConcatString, 100, "%s %s", gColorNames[dataVal & 0xf].name, gBlockDefinitions[type].name);
+        return gConcatString;
+
+    case BLOCK_CARPET:
+        if (dataVal & 0x10) {
+            return "Moss Carpet";
+        }
+        else {
+            sprintf_s(gConcatString, 100, "%s %s", gColorNames[dataVal & 0xf].name, gBlockDefinitions[type].name);
+            return gConcatString;
+        }
+
+    case BLOCK_COLORED_TERRACOTTA:
+        sprintf_s(gConcatString, 100, "%s Terracotta", gColorNames[dataVal & 0xf].name);
+        return gConcatString;
+
+    case BLOCK_REDSTONE_WIRE:
+        sprintf_s(gConcatString, 100, "%s power %d", gBlockDefinitions[type].name, (dataVal & 0xf));
+        return gConcatString;
+
+    case BLOCK_PUMPKIN:
+        if (!(dataVal & 0x4)) {
+            return "Carved Pumpkin";
+        }
+        break;
+
+    case BLOCK_PUMPKIN_STEM:
+    case BLOCK_MELON_STEM:
+        sprintf_s(gConcatString, 100, "%s age %d", gBlockDefinitions[type].name, (dataVal & 0x7));
+        return gConcatString;
+
+    case BLOCK_FLOWER_POT:
+        switch (dataVal)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:	// "Flower Pot" (the default - empty)
+            break;
+        case 2:
+        case YELLOW_FLOWER_FIELD | 0:
+            return "Potted Dandelion";
+        case YELLOW_FLOWER_FIELD | 1:
+            return "Potted Torchflower";
+        case YELLOW_FLOWER_FIELD | 2:
+            return "Potted Closed Eyeblossom";
+        case YELLOW_FLOWER_FIELD | 3:
+            return "Potted Open Eyeblossom";
+        case YELLOW_FLOWER_FIELD | 4:
+            return "Potted Pale Oak Sapling";
+        case YELLOW_FLOWER_FIELD | 5:
+            return "Potted Golden Dandelion";
+        case 1:
+        case RED_FLOWER_FIELD | 0:
+            return "Potted Poppy";
+        case RED_FLOWER_FIELD | 1:
+            return "Potted Blue Orchid";
+        case RED_FLOWER_FIELD | 2:
+            return "Potted Allium";
+        case RED_FLOWER_FIELD | 3:
+            return "Potted Azure Bluet";
+        case RED_FLOWER_FIELD | 4:
+            return "Potted Red Tulip";
+        case RED_FLOWER_FIELD | 5:
+            return "Potted Orange Tulip";
+        case RED_FLOWER_FIELD | 6:
+            return "Potted White Tulip";
+        case RED_FLOWER_FIELD | 7:
+            return "Potted Pink Tulip";
+        case RED_FLOWER_FIELD | 8:
+            return "Potted Oxeye Daisy";
+        case RED_FLOWER_FIELD | 9:
+            return "Potted Cornflower";
+        case RED_FLOWER_FIELD | 10:
+            return "Potted Lily of the Valley";
+        case RED_FLOWER_FIELD | 11:
+            return "Potted Wither Rose";
+        case RED_FLOWER_FIELD | 12:
+            return "Potted Crimson Fungus";
+        case RED_FLOWER_FIELD | 13:
+            return "Potted Warped Fungus";
+        case RED_FLOWER_FIELD | 14:
+            return "Potted Crimson Roots";
+        case RED_FLOWER_FIELD | 15:
+            return "Potted Warped Roots";
+
+        case SAPLING_FIELD | 0:
+        case 3:
+            return "Potted Oak Sapling";
+        case SAPLING_FIELD | 1:
+        case 4:
+            return "Potted Spruce Sapling";
+        case SAPLING_FIELD | 2:
+        case 5:
+            return "Potted Birch Sapling";
+        case SAPLING_FIELD | 3:
+        case 6:
+            return "Potted Jungle Sapling";
+        case SAPLING_FIELD | 4:
+        case 12:
+            return "Potted Acacia Sapling";
+        case SAPLING_FIELD | 5:
+        case 13:
+            return "Potted Dark Oak Sapling";
+        case SAPLING_FIELD | 6:
+            return "Potted Mangrove Propagule";
+        case SAPLING_FIELD | 7:
+            return "Potted Cherry Sapling";
+        case SAPLING_FIELD | 8:
+            return "Potted Pale Oak Sapling";
+
+        case RED_MUSHROOM_FIELD | 0:
+        case 7:
+            return "Potted Red Mushroom";
+        case BROWN_MUSHROOM_FIELD | 0:
+        case 8:
+            return "Potted Brown Mushroom";
+        case TALLGRASS_FIELD | 2:	// yes, weirdly, there's a 2 here but no 0 or 1
+        case 11:
+            return "Potted Fern";
+        case DEADBUSH_FIELD | 0:
+        case 10:
+            return "Potted Dead Bush";
+        case CACTUS_FIELD | 0:
+        case 9:
+            return "Potted Cactus";
+        case BAMBOO_FIELD | 0:
+            return "Potted Bamboo";
+        case AZALEA_FIELD | 0:
+            return "Potted Azalea";
+        case AZALEA_FIELD | 1:
+            return "Potted Flowering Azalea";
+        }
+        break;
+
+    case BLOCK_AZALEA:
+        switch (dataVal & 0x1)
+        {
+        default:
+            assert(0);
+            break;
+        case 0: // normal
+            break;
+        case 1:	// flowering
+            return "Flowering Azalea";
+            break;
+        }
+        break;
+
+    case BLOCK_POPPY:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+            break;
+        case 0: // poppy
+            break;
+        case 1:	// blue orchid
+            return "Blue Orchid";
+        case 2:	// allium
+            return "Allium";
+        case 3:	// azure bluet
+            return "Azure Bluet";
+        case 4:	// red tulip
+            return "Red Tulip";
+        case 5:	// orange tulip
+            return "Orange Tulip";
+        case 6:	// white tulip
+            return "White Tulip";
+        case 7:	// pink tulip
+            return "Pink Tulip";
+        case 8:	// oxeye daisy
+            return "Oxeye Daisy";
+        case 9:
+            return "Cornflower";
+        case 10:
+            return "Lily of the Valley";
+        case 11:
+            return "Wither Rose";
+        // needed for potted plant material names during export:
+        case 12:
+            return "Crimson Fungus";
+        case 13:
+            return "Warped Fungus";
+        case 14:
+            return "Crimson Roots";
+        case 15:
+            return "Warped Roots";
+        }
+        break;
+
+    case BLOCK_DANDELION:
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+            break;
+        case 0: // dandelion
+            break;
+        case 1:	// torchflower
+            return "Torchflower";
+        case 2:
+            return "Closed Eyeblossom";
+        case 3:
+            return "Open Eyeblossom";
+        case 4:
+            return "Pale Oak Sapling";
+        case 5:
+            return "Golden Dandelion";
+        }
+        break;
+
+    case BLOCK_LIGHTNING_ROD:
+        switch (dataVal & 0x30)
+        {
+        default:
+            assert(0);
+            break;
+        case 0: // normal
+            break;
+        case BIT_16:
+            return "Exposed Lightning Rod";
+        case BIT_32:
+            return "Weathered Lightning Rod";
+        case BIT_32 | BIT_16:
+            return "Oxidized Lightning Rod";
+        }
+        break;
+
+    case BLOCK_WAXED_LIGHTNING_ROD:
+        switch (dataVal & 0x30)
+        {
+        default:
+            assert(0);
+            break;
+        case 0: // normal
+            break;
+        case BIT_16:
+            return "Waxed Exposed Lightning Rod";
+        case BIT_32:
+            return "Waxed Weathered Lightning Rod";
+        case BIT_32 | BIT_16:
+            return "Waxed Oxidized Lightning Rod";
+        }
+        break;
+
+    case BLOCK_DOUBLE_FLOWER:
+        // subtract 256, one Y level, as we need to look at the bottom of the plant to ID its type.
+        // This is just a safety net now - we actually shove the data value into the upper part of the plant nowadays, in extractChunk
+        //if ((block != NULL) && (dataVal & 0x8)) {
+        //    // can get name only when the block data is available
+        //    dataVal = block->data[xoff + zoff * 16 + (y - 1) * 256];
+        //}
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+            break;
+        case 0: // sunflower
+            break;
+        case 1:	// lilac
+            return "Lilac";
+        case 2:	// tall grass
+            return "Tall Grass";
+        case 3:	// large fern
+            return "Large Fern";
+        case 4:	// rose bush
+            return "Rose Bush";
+        case 5:	// peony
+            return "Peony";
+        case 6:
+            return "Pitcher Plant";
+        }
+        break;
+
+    case BLOCK_OAK_PLANKS:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:	// spruce
+            return "Spruce Wood Planks";
+        case 2:	// birch
+            return "Birch Wood Planks";
+        case 3:	// jungle
+            return "Jungle Wood Planks";
+        case 4:	// acacia
+            return "Acacia Wood Planks";
+        case 5:	// dark oak
+            return "Dark Oak Wood Planks";
+        case 6:
+            return "Crimson Planks";
+        case 7:
+            return "Warped Planks";
+        case 8:
+            return "Mangrove Planks";
+        case 9:
+            return "Cherry Planks";
+        case 10:
+            return "Bamboo Planks";
+        case 11:
+            return "Bamboo Mosaic";
+        case 12:
+            return "Pale Oak Planks";
+        }
+        break;
+
+    case BLOCK_GLASS:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+        case 0:
+            break;
+        case 1:
+            return "Tinted Glass";
+        }
+        break;
+
+    case BLOCK_STONE:
+        switch (dataVal & 0x1f)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Granite";
+        case 2:
+            return "Polished Granite";
+        case 3:
+            return "Diorite";
+        case 4:
+            return "Polished Diorite";
+        case 5:
+            return "Andesite";
+        case 6:
+            return "Polished Andesite";
+        case 7: // blackstone
+            return "Blackstone";
+        case 8: // chiseled_polished_blackstone
+            return "Chiseled Polished Blackstone";
+        case 9: // polished_blackstone
+            return "Polished Blackstone";
+        case 10: // gilded_blackstone
+            return "Gilded Blackstone";
+        case 11: // polished_blackstone_bricks
+            return "Polished Blackstone Bricks";
+        case 12: // cracked_polished_blackstone_bricks
+            return "Cracked Polished Blackstone Bricks";
+        case 13: // netherite_block
+            return "Netherite Block";
+        case 14: // ancient_debris
+            return "Ancient Debris";
+        case 15: // nether_gold_ore
+            return "Nether Gold Ore";
+        case 16: // test_instance_block
+            return "Test Instance Block";
+        case 17: // cinnabar
+            return "Cinnabar";
+        case 18: // polished_cinnabar
+            return "Polished Cinnabar";
+        case 19: // cinnabar_bricks
+            return "Cinnabar Bricks";
+        case 20: // chiseled_cinnabar
+            return "Chiseled Cinnabar";
+        case 21: // sulfur
+            return "Sulfur";
+        case 22: // polished_sulfur
+            return "Polished Sulfur";
+        case 23: // sulfur_bricks
+            return "Sulfur Bricks";
+        case 24: // chiseled_sulfur
+            return "Chiseled Sulfur";
+        }
+        break;
+
+    case BLOCK_NETHER_BRICKS:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Chiseled Nether Bricks";
+        case 2:
+            return "Cracked Nether Bricks";
+        }
+        break;
+
+    case BLOCK_SOUL_SAND:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Soul Soil";
+        }
+        break;
+
+    case BLOCK_GLOWSTONE:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Shroomlight";
+        }
+        break;
+
+    case BLOCK_NETHER_WART_BLOCK:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Warped Wart Block";
+        }
+        break;
+
+    case BLOCK_DIRT:
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Coarse Dirt";
+        case 2:
+            return "Podzol";
+        case 3:
+            return "Crimson Nylium";
+        case 4:
+            return "Warped Nylium";
+        case 5:
+            return "Reinforced Deepslate";
+        }
+        break;
+
+    case BLOCK_CRYING_OBSIDIAN:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Sculk Catalyst";
+        }
+        break;
+
+    case BLOCK_PINK_PETALS:
+        switch (dataVal & 0x30)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 16:
+            return "Leaf Litter";
+        case 32:
+            return "Wildflowers";
+        }
+        break;
+
+    case BLOCK_SAPLING:
+        // mask off the age_bit - specifies the sapling's growth stage.
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:	// spruce
+            return "Spruce Sapling";
+        case 2:	// birch
+            return "Birch Sapling";
+        case 3:	// jungle
+            return "Jungle Sapling";
+        case 4:	// acacia
+            return "Acacia Sapling";
+        case 5:	// dark oak
+            return "Dark Oak Sapling";
+        case 6:	// bamboo - the sapling came before cherry
+            return "Bamboo Sapling";
+        case 7:	// cherry
+            return "Cherry Sapling";
+        }
+        break;
+
+        // TODO: someday check if "double" and put "Double " at the front of each name returned.
+        // Easier and nice to do with code than adding a bunch of names.
+    case BLOCK_RED_SANDSTONE_DOUBLE_SLAB:
+    case BLOCK_RED_SANDSTONE_SLAB:
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+        case 0:
+            break;
+        case 1:
+            return "Cut Red Sandstone Slab";
+        case 2:
+            return "Smooth Red Sandstone Slab";
+        case 3:
+            return "Cut Sandstone Slab";
+        case 4:
+            return "Smooth Sandstone Slab";
+        case 5:
+            return "Granite Slab";
+        case 6:
+            return "Polished Granite Slab";
+        case 7:
+            return "Smooth Quartz Slab";
+        }
+        break;
+
+    case BLOCK_PURPUR_DOUBLE_SLAB:
+    case BLOCK_PURPUR_SLAB:
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+        case 0:
+        case 1:
+            break;
+        case 2:
+            return "Prismarine Slab";
+        case 3:
+            return "Prismarine Brick Slab";
+        case 4:
+            return "Dark Prismarine Slab";
+        case 5:
+            return "Red Nether Brick Slab";
+        case 6:
+            return "Mossy Stone Brick Slab";
+        case 7:
+            return "Mossy Cobblestone Slab";
+        }
+        break;
+
+    case BLOCK_STRIPPED_OAK:
+        switch (dataVal & 0x3)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:	// spruce
+            return "Stripped Spruce Log";
+        case 2:	// birch
+            return "Stripped Birch Log";
+        case 3:	// jungle
+            return "Stripped Jungle Log";
+        }
+        break;
+
+    case BLOCK_STRIPPED_ACACIA:
+        switch (dataVal & 0x3)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:	// dark oak
+            return "Stripped Dark Oak Log";
+        case 2:
+            return "Stripped Crimson Stem";
+        case 3:
+            return "Stripped Warped Stem";
+        }
+        break;
+
+    case BLOCK_STRIPPED_OAK_WOOD:
+        switch (dataVal & 0x3)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:	// spruce
+            return "Stripped Spruce Wood";
+        case 2:	// birch
+            return "Stripped Birch Wood";
+        case 3:	// jungle
+            return "Stripped Jungle Wood";
+        }
+        break;
+
+    case BLOCK_STRIPPED_ACACIA_WOOD:
+        switch (dataVal & 0x3)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:	// dark oak
+            return "Stripped Dark Oak Wood";
+        case 2:
+            return "Stripped Crimson Hyphae";
+        case 3:	// jungle
+            return "Stripped Warped Hyphae";
+        }
+        break;
+
+    case BLOCK_STRIPPED_MANGROVE:
+        switch (dataVal & 0x3)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Stripped Cherry Log";
+        case 2:
+            return "Stripped Pale Oak Log";
+        }
+        break;
+
+    case BLOCK_STRIPPED_MANGROVE_WOOD:
+        switch (dataVal & 0x3)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Stripped Cherry Wood";
+        case 2:
+            return "Stripped Pale Oak Wood";
+        }
+        break;
+
+    case BLOCK_SIGN_POST:
+        switch (dataVal & (BIT_16 | BIT_32))
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            //return "Oak Sign";
+            break;
+        case BIT_16:	// spruce
+            return "Spruce Sign";
+        case BIT_32:	// birch
+            return "Birch Sign";
+        case BIT_32 | BIT_16:	// jungle
+            return "Jungle Sign";
+        }
+        break;
+
+    case BLOCK_ACACIA_SIGN_POST:
+        switch (dataVal & (BIT_16 | BIT_32))
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            //return "Acacia Sign";
+            break;
+        case BIT_16:	// dark oak
+            return "Dark Oak Sign";
+        case BIT_32:	// dark oak
+            return "Crimson Sign";
+        case BIT_32 | BIT_16:	// dark oak
+            return "Warped Sign";
+        }
+        break;
+
+    case BLOCK_MANGROVE_SIGN_POST:
+        switch (dataVal & (BIT_16 | BIT_32))
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            //return "Mangrove Sign";
+            break;
+        case BIT_16:
+            return "Cherry Sign";
+        case BIT_32:
+            return "Bamboo Sign";
+        case BIT_32 | BIT_16:
+            return "Pale Oak Sign";
+        }
+        break;
+
+    case BLOCK_WALL_SIGN:
+        switch (dataVal & (BIT_8 | BIT_16 | BIT_32))
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            return "Oak Wall Sign";
+        case BIT_8:	// spruce
+            return "Spruce Wall Sign";
+        case BIT_16:	// birch
+            return "Birch Wall Sign";
+        case BIT_16 | BIT_8:	// jungle
+            return "Jungle Wall Sign";
+        case BIT_32:	// acacia
+            return "Acacia Wall Sign";
+        case BIT_32 | BIT_8:	// dark oak
+            return "Dark Oak Wall Sign";
+        case BIT_32 | BIT_16:
+            return "Crimson Wall Sign";
+        case BIT_32 | BIT_16 | BIT_8:
+            return "Warped Wall Sign";
+        }
+        break;
+
+    case BLOCK_MANGROVE_WALL_SIGN:
+        switch (dataVal & (BIT_8 | BIT_16 | BIT_32))
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            return "Mangrove Wall Sign";
+        case BIT_8:
+            return "Cherry Wall Sign";
+        case BIT_16:	// bamboo
+            return "Bamboo Wall Sign";
+        case BIT_16 | BIT_8:	// pale oak
+            return "Pale Oak Wall Sign";
+        }
+        break;
+
+    case BLOCK_SMOOTH_STONE:
+        switch (dataVal & 0x3)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1: // sandstone
+            return "Smooth Sandstone";
+        case 2: // red sandstone
+            return "Smooth Red Sandstone";
+        case 3: // quartz
+            return "Quartz";
+        }
+        break;
+
+        // special, returns its own particular constructed name
+    case BLOCK_CORAL_BLOCK:
+    case BLOCK_CORAL:
+    case BLOCK_CORAL_FAN:
+    case BLOCK_CORAL_WALL_FAN:
+    case BLOCK_DEAD_CORAL_BLOCK:
+    case BLOCK_DEAD_CORAL:
+    case BLOCK_DEAD_CORAL_FAN:
+    case BLOCK_DEAD_CORAL_WALL_FAN:
+        switch (type) {
+        case BLOCK_CORAL_BLOCK:
+            sprintf_s(gConcatString, 100, "%s Coral Block", gCoralNames[dataVal & 0x7].name);
+            break;
+        case BLOCK_CORAL:
+            sprintf_s(gConcatString, 100, "%s Coral", gCoralNames[dataVal & 0x7].name);
+            break;
+        case BLOCK_CORAL_FAN:
+            sprintf_s(gConcatString, 100, "%s Coral Fan", gCoralNames[dataVal & 0x7].name);
+            break;
+        case BLOCK_CORAL_WALL_FAN:
+            sprintf_s(gConcatString, 100, "%s Coral Wall Fan", gCoralNames[dataVal & 0x7].name);
+            break;
+        case BLOCK_DEAD_CORAL_BLOCK:
+            sprintf_s(gConcatString, 100, "Dead %s Coral Block", gCoralNames[dataVal & 0x7].name);
+            break;
+        case BLOCK_DEAD_CORAL:
+            sprintf_s(gConcatString, 100, "Dead %s Coral", gCoralNames[dataVal & 0x7].name);
+            break;
+        case BLOCK_DEAD_CORAL_FAN:
+            sprintf_s(gConcatString, 100, "Dead %s Coral Fan", gCoralNames[dataVal & 0x7].name);
+            break;
+        case BLOCK_DEAD_CORAL_WALL_FAN:
+            sprintf_s(gConcatString, 100, "Dead %s Coral Wall Fan", gCoralNames[dataVal & 0x7].name);
+            break;
+        }
+        return gConcatString;
+
+    case BLOCK_ANDESITE_DOUBLE_SLAB:
+    case BLOCK_ANDESITE_SLAB:
+        // a little wasteful if the default is returned after all
+        strcpy_s(gConcatString, 100, (type == BLOCK_ANDESITE_DOUBLE_SLAB) ? "Double " : "");
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+            return gBlockDefinitions[type].name;
+        case 0:
+            return gBlockDefinitions[type].name;
+        case 1:
+            strcat_s(gConcatString, 100, "Polished Andesite Slab");
+            break;
+        case 2:
+            strcat_s(gConcatString, 100, "Diorite Slab");
+            break;
+        case 3:
+            strcat_s(gConcatString, 100, "Polished Diorite Slab");
+            break;
+        case 4:
+            strcat_s(gConcatString, 100, "End Stone Brick Slab");
+            break;
+        case 5:
+            strcat_s(gConcatString, 100, "Stone Slab");
+            break;
+        case 6: // mangrove
+            strcat_s(gConcatString, 100, "Mangrove Slab");
+            break;
+        case 7: // mud brick
+            strcat_s(gConcatString, 100, "Mud Brick Slab");
+            break;
+        }
+        return gConcatString;
+
+    case BLOCK_STONE_DOUBLE_SLAB:
+    case BLOCK_STONE_SLAB:
+        // a little wasteful if the default is returned after all
+        strcpy_s(gConcatString, 100, (type == BLOCK_STONE_DOUBLE_SLAB) ? "Double " : "");
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            return gBlockDefinitions[type].name;
+        case 1:
+            // sandstone
+            strcat_s(gConcatString, 100, "Sandstone Slab");
+            break;
+        case 2:
+            // wooden
+            strcat_s(gConcatString, 100, "Petrified Oak Slab");
+            break;
+        case 3:
+            // cobblestone
+            strcat_s(gConcatString, 100, "Cobblestone Slab");
+            break;
+        case 4:
+            // brick
+            strcat_s(gConcatString, 100, "Brick Slab");
+            break;
+        case 5:
+            // stone brick
+            strcat_s(gConcatString, 100, "Stone Brick Slab");
+            break;
+        case 6:
+            // nether brick
+            strcat_s(gConcatString, 100, "Nether Brick Slab");
+            break;
+        case 7:
+            // quartz with distinctive sides and bottom
+            strcat_s(gConcatString, 100, "Quartz Slab");
+            break;
+        }
+        return gConcatString;
+
+    case BLOCK_WOODEN_DOUBLE_SLAB:
+    case BLOCK_WOODEN_SLAB:
+        // a little wasteful if the default is returned after all
+        strcpy_s(gConcatString, 100, (type == BLOCK_WOODEN_DOUBLE_SLAB) ? "Double " : "");
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+            return gBlockDefinitions[type].name;
+        case 0: // normal log
+            return gBlockDefinitions[type].name;
+        case 1: // spruce (dark)
+            strcat_s(gConcatString, 100, "Spruce Slab");
+            break;
+        case 2: // birch
+            strcat_s(gConcatString, 100, "Birch Slab");
+            break;
+        case 3: // jungle
+            strcat_s(gConcatString, 100, "Jungle Slab");
+            break;
+        case 4: // acacia
+            strcat_s(gConcatString, 100, "Acacia Slab");
+            break;
+        case 5: // dark oak
+            strcat_s(gConcatString, 100, "Dark Oak Slab");
+            break;
+        case 6:
+            strcat_s(gConcatString, 100, "Cherry Slab");
+            break;
+        case 7:
+            strcat_s(gConcatString, 100, "Bamboo Slab");
+            break;
+        }
+        return gConcatString;
+
+    case BLOCK_CRIMSON_DOUBLE_SLAB:
+    case BLOCK_CRIMSON_SLAB:
+        // a little wasteful if the default is returned after all
+        strcpy_s(gConcatString, 100, (type == BLOCK_CRIMSON_DOUBLE_SLAB) ? "Double " : "");
+        switch (dataVal & 0x17)
+        {
+        default:
+            assert(0);
+            return gBlockDefinitions[type].name;
+        case 0: // crimson
+            return gBlockDefinitions[type].name;
+        case 1:
+            strcat_s(gConcatString, 100, "Warped Slab");
+            break;
+        case 2:
+            strcat_s(gConcatString, 100, "Blackstone Slab");
+            break;
+        case 3:
+            strcat_s(gConcatString, 100, "Polished Blackstone Slab");
+            break;
+        case 4:
+            strcat_s(gConcatString, 100, "Polished Blackstone Brick Slab");
+            break;
+        case 5:
+            strcat_s(gConcatString, 100, "Bamboo Mosaic Slab");
+            break;
+        case 6:
+            strcat_s(gConcatString, 100, "Pale Oak Slab");
+            break;
+        case 7:
+            strcat_s(gConcatString, 100, "Resin Brick Slab");
+            break;
+        case BIT_16 | 0: // cinnabar
+            strcat_s(gConcatString, 100, "Cinnabar Slab");
+            break;
+        case BIT_16 | 1: // polished_cinnabar
+            strcat_s(gConcatString, 100, "Polished Cinnabar Slab");
+            break;
+        case BIT_16 | 2: // cinnabar_bricks
+            strcat_s(gConcatString, 100, "Cinnabar Brick Slab");
+            break;
+        case BIT_16 | 3: // sulfur
+            strcat_s(gConcatString, 100, "Sulfur Slab");
+            break;
+        case BIT_16 | 4: // polished_sulfur
+            strcat_s(gConcatString, 100, "Polished Sulfur Slab");
+            break;
+        case BIT_16 | 5: // sulfur_bricks
+            strcat_s(gConcatString, 100, "Sulfur Brick Slab");
+            break;
+        }
+        return gConcatString;
+
+    case BLOCK_CUT_COPPER_DOUBLE_SLAB:
+    case BLOCK_CUT_COPPER_SLAB:
+        // a little wasteful if the default is returned after all
+        strcpy_s(gConcatString, 100, (type == BLOCK_CUT_COPPER_DOUBLE_SLAB) ? "Double " : "");
+        switch (dataVal & 0x17)
+        {
+        default:
+            assert(0);
+            return gBlockDefinitions[type].name;
+        case 0: // cut copper
+            return gBlockDefinitions[type].name;
+        case 1:
+            strcat_s(gConcatString, 100, "Exposed Cut Copper Slab");
+            break;
+        case 2:
+            strcat_s(gConcatString, 100, "Weathered Cut Copper Slab");
+            break;
+        case 3:
+            strcat_s(gConcatString, 100, "Oxidized Cut Copper Slab");
+            break;
+        case 4:
+            strcat_s(gConcatString, 100, "Waxed Cut Copper Slab");
+            break;
+        case 5:
+            strcat_s(gConcatString, 100, "Waxed Exposed Cut Copper Slab");
+            break;
+        case 6:
+            strcat_s(gConcatString, 100, "Waxed Weathered Cut Copper Slab");
+            break;
+        case 7:
+            strcat_s(gConcatString, 100, "Waxed Oxidized Cut Copper Slab");
+            break;
+        case BIT_16 | 0:
+            strcat_s(gConcatString, 100, "Cobbled Deepslate Slab");
+            break;
+        case BIT_16 | 1:
+            strcat_s(gConcatString, 100, "Polished Deepslate Slab");
+            break;
+        case BIT_16 | 2:
+            strcat_s(gConcatString, 100, "Deepslate Brick Slab");
+            break;
+        case BIT_16 | 3:
+            strcat_s(gConcatString, 100, "Deepslate Tile Slab");
+            break;
+        case BIT_16 | 4:
+            strcat_s(gConcatString, 100, "Tuff Slab");
+            break;
+        case BIT_16 | 5:
+            strcat_s(gConcatString, 100, "Polished Tuff Slab");
+            break;
+        case BIT_16 | 6:
+            strcat_s(gConcatString, 100, "Tuff Brick Slab");
+            break;
+        }
+        return gConcatString;
+
+    case BLOCK_WEEPING_VINES:
+        // note we ignore BIT_32, which is top and bottom
+        switch (dataVal & 0xf) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Twisting Vines";
+        case 2:
+            return "Hanging Roots";
+        }
+        break;
+
+    case BLOCK_CAVE_VINES:
+    case BLOCK_CAVE_VINES_LIT:
+        switch (dataVal & 0x1) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Cave Vines Plant";
+        }
+        break;
+
+    case BLOCK_COBBLESTONE_WALL:
+        switch (dataVal & 0x1f) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            // no change, default cobblestone is fine
+            break;
+        case 1: // mossy cobblestone
+            return "Mossy Cobblestone Wall";
+        case 2: // brick wall
+            return "Brick Wall";
+        case 3: // granite wall
+            return "Granite Wall";
+        case 4: // diorite wall
+            return "Diorite Wall";
+        case 5: // andesite wall
+            return "Andesite Wall";
+        case 6: // prismarine wall
+            return "Prismarine Wall";
+        case 7: // stone brick wall
+            return "Stone Brick Wall";
+        case 8: // mossy stone brick wall
+            return "Mossy Stone Brick Wall";
+        case 9: // end stone brick wall
+            return "End Stone Brick Wall";
+        case 10: // nether brick wall
+            return "Nether Brick Wall";
+        case 11: // red nether brick wall
+            return "Red Nether Brick Wall";
+        case 12: // sandstone wall
+            return "Sandstone Wall";
+        case 13: // red sandstone wall
+            return "Red Sandstone Wall";
+        case 14:
+            return "Blackstone Wall";
+        case 15:
+            return "Polished Blackstone Wall";
+        case 16:
+            return "Polished Blackstone Brick Wall";
+        case 17:
+            return "Cobbled Deepslate Wall";
+        case 18:
+            return "Polished Deepslate Wall";
+        case 19:
+            return "Deepslate Brick Wall";
+        case 20:
+            return "Deepslate Tile Wall";
+        case 21:
+            return "Mud Brick Wall";
+        case 22:
+            return "Tuff Wall";
+        case 23:
+            return "Polished Tuff Wall";
+        case 24:
+            return "Tuff Brick Wall";
+        case 25:
+            return "Resin Brick Wall";
+        case 26:    // cinnabar_wall
+            return "Cinnabar  Wall";
+        case 27:    // polished_cinnabar_wall
+            return "Polished Cinnabar Wall";
+        case 28:    // cinnabar_brick_wall
+            return "Cinnabar Brick Wall";
+        case 29:    // sulfur_wall
+            return "Sulfur Wall";
+        case 30:    // polished_sulfur_wall
+            return "Polished Sulfur Wall";
+        case 31:    // sulfur_brick_wall
+            return "Sulfur Brick Wall";
+        }
+        break;
+
+    case BLOCK_PRISMARINE:
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1: // bricks
+            return "Prismarine Bricks";
+        case 2: // dark
+            return "Dark Prismarine";
+        }
+        break;
+
+    case BLOCK_FURNACE:
+    case BLOCK_BURNING_FURNACE:
+        switch (dataVal & (BIT_32 | BIT_16)) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case BIT_16:	// loom
+            return "Loom";
+        case BIT_32:	// smoker
+            return "Smoker";
+        case BIT_32 | BIT_16:	// blast furnace
+            return "Blast Furnace";
+        }
+        break;
+
+    case BLOCK_BOOKSHELF:
+        if (dataVal & BIT_16) {
+            return "Chiseled Bookshelf";
+        }
+        break;
+
+    case BLOCK_CRAFTING_TABLE:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:	// cartography
+            return "Cartography Table";
+        case 2:	// fletching
+            return "Fletching Table";
+        case 3:	// smithing
+            return "Smithing Table";
+        case 4:
+            return "Lodestone";
+        }
+        break;
+
+    case BLOCK_SAND:
+        switch (dataVal & 0x1)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:	// red sand
+            return "Red Sand";
+        }
+        break;
+
+    case BLOCK_TNT:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Target";
+        }
+        break;
+
+    case BLOCK_RED_MUSHROOM:
+        switch (dataVal & 0xf)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Crimson Fungus";
+        case 2:
+            return "Warped Fungus";
+        }
+        break;
+
+    case BLOCK_LANTERN:
+        switch (dataVal & 0x1E)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1 << 1:
+            return "Soul Lantern";
+        case 2 << 1:
+            return "Copper Lantern";
+        case 3 << 1:
+            return "Exposed Copper Lantern";
+        case 4 << 1:
+            return "Weathered Copper Lantern";
+        case 5 << 1:
+            return "Oxidized Copper Lantern";
+        case 6 << 1:
+            return "Waxed Copper Lantern";
+        case 7 << 1:
+            return "Waxed Exposed Copper Lantern";
+        case 8 << 1:
+            return "Waxed Weathered Copper Lantern";
+        case 9 << 1:
+            return "Waxed Oxidized Copper Lantern";
+        }
+        break;
+
+    case BLOCK_CAMPFIRE:
+        switch (dataVal & 0x8)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 8:
+            return "Soul Campfire";
+        }
+        break;
+
+    case BLOCK_FIRE:
+        switch (dataVal & BIT_16)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case BIT_16:
+            return "Soul Fire";
+        }
+        break;
+
+    case BLOCK_LOG:
+        if (dataVal & BIT_16) {
+            switch (dataVal & 0x3)
+            {
+            default:
+                assert(0);
+                break;
+            case 0:
+                return "Oak Wood";
+            case 1:	// spruce
+                return "Spruce Wood";
+            case 2:	// birch
+                return "Birch Wood";
+            case 3:	// jungle
+                return "Jungle Wood";
+            }
+        }
+        else {
+            switch (dataVal & 0x3)
+            {
+            default:
+                assert(0);
+                break;
+            case 0:
+                break;
+            case 1:	// spruce
+                return "Spruce Log";
+            case 2:	// birch
+                return "Birch Log";
+            case 3:	// jungle
+                return "Jungle Log";
+            }
+        }
+        break;
+
+    case BLOCK_AD_LOG:
+        if (dataVal & BIT_16) {
+            switch (dataVal & 0x3)
+            {
+            default:
+                assert(0);
+                break;
+            case 0:
+                return "Acacia Wood";
+            case 1:	// dark oak
+                return "Dark Oak Wood";
+            case 2:
+                return "Crimson Hyphae";
+            case 3:
+                return "Warped Hyphae";
+            }
+        }
+        else {
+            switch (dataVal & 0x3)
+            {
+            default:
+                assert(0);
+                break;
+            case 0:
+                break;
+            case 1:	// dark oak
+                return "Dark Oak Log";
+            case 2:
+                return "Crimson Stem";
+            case 3:
+                return "Warped Stem";
+            }
+        }
+        break;
+
+    case BLOCK_MANGROVE_LOG:
+        if (dataVal & BIT_16) {
+            switch (dataVal & 0x3)
+            {
+            default:
+                assert(0);
+                break;
+            case 0:
+                return "Mangrove Wood";
+            case 1:
+                return "Cherry Wood";
+            case 2:
+                return "Pale Oak Wood";
+            }
+        }
+        else {
+            switch (dataVal & 0x3)
+            {
+            default:
+                assert(0);
+                break;
+            case 0:
+                break;
+            case 1:
+                return "Cherry Log";
+            case 2:
+                return "Pale Oak Log";
+            }
+        }
+        break;
+
+    case BLOCK_STATIONARY_WATER:
+        if (dataVal & BIT_16)
+        {
+            // bubble column
+            return "Bubble Column";
+        }
+        break;
+
+    case BLOCK_SPONGE:
+        switch (dataVal & 0x1)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Wet Sponge";
+        }
+        break;
+
+    case BLOCK_BONE_BLOCK:
+        switch (dataVal & 0x13)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Basalt";
+        case 2:
+            return "Polished Basalt";
+        case 3:
+            return "Deepslate";
+        case BIT_16:
+            return "Infested Deepslate";
+        }
+        break;
+
+    case BLOCK_SANDSTONE:
+        switch (dataVal & 0x3) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1: // chiseled
+            return "Chiseled Sandstone";
+        case 2: // smooth
+            return "Cut Sandstone";
+        }
+        break;
+
+    case BLOCK_RED_SANDSTONE:
+        switch (dataVal & 0x3) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1: // chiseled
+            return "Chiseled Red Sandstone";
+        case 2: // smooth
+            return "Cut Red Sandstone";
+        }
+        break;
+
+    case BLOCK_STONE_BRICKS:
+        switch (dataVal & 0x3) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1: // mossy - small color difference, so this isn't added to color table
+            return "Mossy Stone Bricks";
+        case 2: // cracked
+            return "Cracked Stone Bricks";
+        case 3: // chiseled
+            return "Chiseled Stone Bricks";
+        }
+        break;
+
+    case BLOCK_INFESTED_STONE:
+        switch (dataVal & 0x7) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1: // cobblestone
+            return "Infested Cobblestone";
+        case 2: // stone brick
+            return "Infested Stone Bricks";
+        case 3: // mossy - small color difference, so this isn't added to color table
+            return "Infested Mossy Stone Bricks";
+        case 4: // cracked
+            return "Infested Cracked Stone Bricks";
+        case 5: // chiseled
+            return "Infested Chiseled Stone Bricks";
+        }
+        break;
+
+    case BLOCK_QUARTZ_BLOCK:
+        switch (dataVal & 0x7) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1: // chiseled quartz block
+            return "Chiseled Quartz Block";
+        case 2: // quartz pillar
+        case 3: // quartz pillar
+        case 4: // quartz pillar - different directions
+            return "Quartz Pillar";
+        case 5:
+            return "Quartz Brick";
+        }
+        break;
+
+    case BLOCK_HEAD:
+        switch (dataVal & 0x70) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            sprintf_s(gConcatString, 100, "Skeleton %sSkull", (dataVal & 0x80) ? "" : "Wall ");
+            break;
+        case 1 << 4:
+            sprintf_s(gConcatString, 100, "Wither Skeleton %sSkull", (dataVal & 0x80) ? "" : "Wall ");
+            break;
+        case 2 << 4:
+            sprintf_s(gConcatString, 100, "Zombie %sHead", (dataVal & 0x80) ? "" : "Wall ");
+            break;
+        case 3 << 4:
+            sprintf_s(gConcatString, 100, "Player %sHead", (dataVal & 0x80) ? "" : "Wall ");
+            break;
+        case 4 << 4:
+            sprintf_s(gConcatString, 100, "Creeper %sHead", (dataVal & 0x80) ? "" : "Wall ");
+            break;
+        case 5 << 4:
+            sprintf_s(gConcatString, 100, "Dragon %sHead", (dataVal & 0x80) ? "" : "Wall ");
+            break;
+        case 6 << 4:
+            sprintf_s(gConcatString, 100, "Piglin %sHead", (dataVal & 0x80) ? "" : "Wall ");
+            break;
+        }
+        return gConcatString;
+
+    case BLOCK_ANVIL:
+        switch (dataVal & 0xC)
+        {
+        default:
+            assert(0);
+            break;
+        case 0: // as is
+            break;
+        case 4:
+            return "Chipped Anvil";
+        case 8:
+            return "Damaged Anvil";
+        }
+        break;
+
+    case BLOCK_BEE_NEST:
+        if (dataVal & BIT_32)
+        {
+            return "Beehive";
+        }
+        break;
+
+    case BLOCK_COLORED_CANDLE:
+        // someday, when I add beds with colors: case BLOCK_BED - and we'll probably need to shift the data value, since the lower bits are used for top/bottom etc.
+        sprintf_s(gConcatString, 100, "%s %s", gColorNames[dataVal & 0xf].name, gBlockDefinitions[BLOCK_CANDLE].name);
+        return gConcatString;
+
+    case BLOCK_LIT_COLORED_CANDLE:
+        // someday, when I add beds with colors: case BLOCK_BED - and we'll probably need to shift the data value, since the lower bits are used for top/bottom etc.
+        sprintf_s(gConcatString, 100, "Lit %s %s", gColorNames[dataVal & 0xf].name, gBlockDefinitions[BLOCK_CANDLE].name);
+        return gConcatString;
+
+    case BLOCK_AMETHYST:
+        switch (dataVal & 0x3f) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Budding Amethyst";
+        case 2:
+            return "Calcite";
+        case 3:
+            return "Tuff";
+        case 4:
+            return "Dripstone Block";
+        case 5:
+            return "Copper Ore";
+        case 6:
+            return "Deepslate Copper Ore";
+        case 7:
+            return "Block of Copper";
+        case 8:
+            return "Exposed Copper";
+        case 9:
+            return "Weathered Copper";
+        case 10:
+            return "Oxidized Copper";
+        case 11:
+            return "Cut Copper";
+        case 12:
+            return "Exposed Cut Copper";
+        case 13:
+            return "Weathered Cut Copper";
+        case 14:
+            return "Oxidized Cut Copper";
+        case 15:
+            return "Waxed Block of Copper";
+        case 16:
+            return "Waxed Exposed Copper";
+        case 17:
+            return "Waxed Weathered Copper";
+        case 18:
+            return "Waxed Oxidized Copper";
+        case 19:
+            return "Waxed Cut Copper";
+        case 20:
+            return "Waxed Exposed Cut Copper";
+        case 21:
+            return "Waxed Weathered Cut Copper";
+        case 22:
+            return "Waxed Oxidized Cut Copper";
+        case 23:
+            return "Moss Block";
+        case 24:
+            return "Rooted Dirt";
+        case 25:
+            return "Powder Snow";
+        case 26:
+            return "Cobbled Deepslate";
+        case 27:
+            return "Chiseled Deepslate";
+        case 28:
+            return "Polished Deepslate";
+        case 29:
+            return "Deepslate Bricks";
+        case 30:
+            return "Deepslate Tiles";
+        case 31:
+            return "Cracked Deepslate Bricks";
+        case 32:
+            return "Cracked Deepslate Tiles";
+        case 33:
+            return "Smooth Basalt";
+        case 34:
+            return "Block of Raw Iron";
+        case 35:
+            return "Block of Raw Copper";
+        case 36:
+            return "Block of Raw Gold";
+        case 37:
+            return "Deepslate Coal Ore";
+        case 38:
+            return "Deepslate Iron Ore";
+        case 39:
+            return "Deepslate Gold Ore";
+        case 40:
+            return "Deepslate Redstone Ore";
+        case 41:
+            return "Deepslate Emerald Ore";
+        case 42:
+            return "Deepslate Lapis Lazuli Ore";
+        case 43:
+            return "Deepslate Diamond Ore";
+        case 44:
+            return "Mud";
+        case 45:
+            return "Mud Bricks";
+        case 46:
+            return "Packed Mud";
+        case 47:
+            return "Sculk";
+        case 48:
+            return "Polished Tuff";
+        case 49:
+            return "Chiseled Copper";
+        case 50:
+            return "Exposed Chiseled Copper";
+        case 51:
+            return "Weathered Chiseled Copper";
+        case 52:
+            return "Oxidized Chiseled Copper";
+        case 53:
+            return "Waxed Chiseled Copper";
+        case 54:
+            return "Waxed Exposed Chiseled Copper";
+        case 55:
+            return "Waxed Weathered Chiseled Copper";
+        case 56:
+            return "Waxed Oxidized Chiseled Copper";
+        case 57:
+            return "Tuff Bricks";
+        case 58:	// chiseled_tuff
+            return "Chiseled Tuff";
+        case 59:	// chiseled_tuff_bricks
+            return "Chiseled Tuff Bricks";
+        case 60:	// pale_moss_block
+            return "Pale Moss Block";
+        case 61:
+            return "Chiseled Resin Bricks";
+        case 62:
+            return "Block of Resin";
+        case 63:
+            return "Resin Bricks";
+        }
+        break;
+
+    case BLOCK_AMETHYST_BUD:
+        switch (dataVal & 0x3) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Medium Amethyst Bud";
+        case 2:
+            return "Large Amethyst Bud";
+        case 3:
+            return "Amethyst Cluster";
+        }
+        break;
+
+    case BLOCK_BIG_DRIPLEAF:
+        switch (dataVal & 0x1) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            // goofy, but they call it out as a separate block type with a name
+            return "Big Dripleaf Stem";
+        }
+        break;
+
+    case BLOCK_FROGLIGHT:
+        switch (dataVal & 0x3)
+        {
+        default:
+            assert(0);
+        case 0:
+            break;
+        case 1:
+            return "Verdant Froglight";
+        case 2:
+            return "Pearlescent Froglight";
+        }
+        break;
+
+    case BLOCK_SCULK_SENSOR:
+        if (dataVal & 0x4)
+        {
+            return "Calibrated Sculk Sensor";
+        }
+        break;
+
+    case BLOCK_MANGROVE_LEAVES:
+        // since these leaves are > 256 in type, we can safely use all the bits
+        switch (dataVal & 0x3)
+        {
+        default:
+            assert(0);
+        case 0:
+            break;
+        case 1:
+            return "Cherry Leaves";
+        case 2:
+            return "Pale Oak Leaves";
+        }
+        break;
+
+    case BLOCK_SUSPICIOUS_GRAVEL:
+        if (dataVal & 0x4)
+        {
+            return "Suspicious Sand";
+        }
+        break;
+
+    case BLOCK_HAY:
+        switch (dataVal & 0x3)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Block of Bamboo";
+        case 2:
+            return "Block of Stripped Bamboo";
+        }
+        break;
+
+    case BLOCK_OAK_WALL_HANGING_SIGN:
+        switch (dataVal & (0xC | BIT_16 | BIT_32))
+        {
+        default:
+            assert(0);
+        case 0:
+            break;
+            // return "Oak Wall Hanging Sign";
+        case 1 << 2:	// spruce
+            return "Spruce Wall Hanging Sign";
+        case 2 << 2:	// birch
+            return "Birch Wall Hanging Sign";
+        case 3 << 2:	// jungle
+            return "Jungle Wall Hanging Sign";
+        case 4 << 2:	// acacia
+            return "Acacia Wall Hanging Sign";
+        case 5 << 2:	// dark oak
+            return "Dark Oak Wall Hanging Sign";
+        case 6 << 2:
+            return "Crimson Wall Hanging Sign";
+        case 7 << 2:
+            return "Warped Wall Hanging Sign";
+        case 8 << 2:
+            return "Mangrove Wall Hanging Sign";
+        case 9 << 2:
+            return "Cherry Wall Hanging Sign";
+        case 10 << 2:
+            return "Bamboo Wall Hanging Sign";
+        case 11 << 2:
+            return "Pale Oak Wall Hanging Sign";
+        }
+        break;
+
+    case BLOCK_OAK_HANGING_SIGN:
+        if (dataVal & BIT_16)
+        {
+            return "Spruce Hanging Sign";
+        }
+        break;
+
+    case BLOCK_ACACIA_HANGING_SIGN:
+        if (dataVal & BIT_16)
+        {
+            return "Dark Oak Hanging Sign";
+        }
+        break;
+
+    case BLOCK_CRIMSON_HANGING_SIGN:
+        if (dataVal & BIT_16)
+        {
+            return "Warped Hanging Sign";
+        }
+        break;
+
+    case BLOCK_MANGROVE_HANGING_SIGN:
+        if (dataVal & BIT_16)
+        {
+            return "Cherry Hanging Sign";
+        }
+        break;
+
+    case BLOCK_COPPER_BULB:
+        switch (dataVal & 0x7) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Exposed Copper Bulb";
+        case 2:
+            return "Weathered Copper Bulb";
+        case 3:
+            return "Oxidized Copper Bulb";
+        case 4:
+            return "Waxed Copper Bulb";
+        case 5:
+            return "Waxed Exposed Copper Bulb";
+        case 6:
+            return "Waxed Weathered Copper Bulb";
+        case 7:
+            return "Waxed Oxidized Copper Bulb";
+        }
+        break;
+
+    case BLOCK_COPPER_GOLEM_STATUE:
+    case BLOCK_WAXED_COPPER_GOLEM_STATUE: {
+        // Oxidation in bits 0x30 of dataVal; "Waxed " prefix from block ID.
+        const char* base;
+        switch ((dataVal >> 4) & 0x3) {
+        default:
+        case 0: base = "Copper Golem Statue"; break;
+        case 1: base = "Exposed Copper Golem Statue"; break;
+        case 2: base = "Weathered Copper Golem Statue"; break;
+        case 3: base = "Oxidized Copper Golem Statue"; break;
+        }
+        if (type == BLOCK_WAXED_COPPER_GOLEM_STATUE) {
+            switch ((dataVal >> 4) & 0x3) {
+            default:
+            case 0: return "Waxed Copper Golem Statue";
+            case 1: return "Waxed Exposed Copper Golem Statue";
+            case 2: return "Waxed Weathered Copper Golem Statue";
+            case 3: return "Waxed Oxidized Copper Golem Statue";
+            }
+        }
+        return base;
+    }
+
+    case BLOCK_COPPER_GRATE:
+        switch (dataVal & 0x7) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Exposed Copper Grate";
+        case 2:
+            return "Weathered Copper Grate";
+        case 3:
+            return "Oxidized Copper Grate";
+        case 4:
+            return "Waxed Copper Grate";
+        case 5:
+            return "Waxed Exposed Copper Grate";
+        case 6:
+            return "Waxed Weathered Copper Grate";
+        case 7:
+            return "Waxed Oxidized Copper Grate";
+        }
+        break;
+
+    case BLOCK_STONE_PRESSURE_PLATE: // now has 26 states, ignore lowest bit
+        switch ((dataVal & 0x7e)>>1) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Spruce Pressure Plate";
+        case 2:
+            return "Birch Pressure Plate";
+        case 3:
+            return "Jungle Pressure Plate";
+        case 4:
+            return "Acacia Pressure Plate";
+        case 5:
+            return "Dark Oak Pressure Plate";
+        case 6:
+            return "Crimson Pressure Plate";
+        case 7:
+            return "Warped Pressure Plate";
+        case 8:
+            return "Polished Blackstone Pressure Plate";
+        case 9:
+            return "Mangrove Pressure Plate";
+        case 10:
+            return "Cherry Pressure Plate";
+        case 11:
+            return "Bamboo Pressure Plate";
+        case 12:
+            return "Pale Oak Pressure Plate";
+        }
+        break;
+    case BLOCK_COPPER_BARS:
+        switch ((dataVal & 0x30) >> 4) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Exposed Copper Bars";
+        case 2:
+            return "Weathered Copper Bars";
+        case 3:
+            return "Oxidized Copper Bars";
+        }
+        break;
+    case BLOCK_WAXED_COPPER_BARS:
+        switch ((dataVal & 0x30) >> 4) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Waxed Exposed Copper Bars";
+        case 2:
+            return "Waxed Weathered Copper Bars";
+        case 3:
+            return "Waxed Oxidized Copper Bars";
+        }
+        break;
+    case BLOCK_CHAIN:
+        switch (dataVal & 0x33) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            // iron chain
+            break;
+        case 1:
+            return "Copper Chain";
+        case 2:
+            return "Exposed Copper Chain";
+        case 3:
+            return "Weathered Copper Chain";
+        case BIT_16:
+            return "Oxidized Copper Chain";
+        case BIT_16 | 1:
+            return "Waxed Copper Chain";
+        case BIT_16 | 2:
+            return "Waxed Exposed Copper Chain";
+        case BIT_16 | 3:
+            return "Waxed Weathered Copper Chain";
+        case BIT_32:
+            return "Waxed Oxidized Copper Chain";
+        }
+        break;
+    case BLOCK_COPPER_CHEST:
+        switch (dataVal & 0x20) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            // default copper chest
+            break;
+        case 0x20:
+            return "Exposed Copper Chest";
+        }
+        break;
+    case BLOCK_OXIDIZED_COPPER_CHEST:
+        switch (dataVal & 0x20) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            // default Oxidised chest
+            break;
+        case 0x20:
+            return "Weathered Copper Chest";
+        }
+        break;
+    case BLOCK_WAXED_COPPER_CHEST:
+        switch (dataVal & 0x20) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            // default copper chest
+            break;
+        case 0x20:
+            return "Waxed Exposed Copper Chest";
+        }
+        break;
+    case BLOCK_WAXED_OXIDIZED_COPPER_CHEST:
+        switch (dataVal & 0x20) {
+        default:
+            assert(0);
+            break;
+        case 0:
+            // default Oxidised chest
+            break;
+        case 0x20:
+            return "Waxed Weathered Copper Chest";
+        }
+        break;
+    case BLOCK_ACACIA_SHELF:
+        switch ((dataVal & 0x38) >> 3)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Birch Shelf";
+        case 2:
+            return "Cherry Shelf";
+        case 3:
+            return "Crimson Shelf";
+        case 4:
+            return "Dark Oak Shelf";
+        case 5:
+            return "Jungle Shelf";
+        case 6:
+            return "Mangrove Shelf";
+        case 7:
+            return "Oak Shelf";
+        }
+        break;
+    case BLOCK_PALE_OAK_SHELF:
+        switch ((dataVal & 0x38)>>3)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case 1:
+            return "Warped Shelf";
+        case 2:
+            return "Bamboo Shelf";
+        case 3:
+            return "Spruce Shelf";
+        }
+        break;
+
+    case BLOCK_POINTED_DRIPSTONE:
+        switch (dataVal & BIT_16)
+        {
+        default:
+            assert(0);
+            break;
+        case 0:
+            break;
+        case BIT_16:
+            return "Sulfur Spike";
+        }
+        break;
+
+    }
+
+    return gBlockDefinitions[type].name;
+}   // endend
+
+// ===== end mw_loadblock.cpp =====
+
+/* ==== 从 MinewaysMap.cpp 逐字抽取：GetBlockDataColor / UnknownBlockID（ObjFileManip 导出配色依赖） ==== */
+void SetUnknownBlockID(int val)
+{
+    gUnknownBlockID = val;
+}
+int GetUnknownBlockID()
+{
+    return gUnknownBlockID;
+}
+
+unsigned int GetBlockDataColor(int type, int dataVal)
+{
+    unsigned int color;
+
+    switch (type)
+    {
+    case BLOCK_WOOL:
+    case BLOCK_CARPET:
+        switch (dataVal & 0x1f)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:
+            return 0xDA8248;
+        case 2:
+            return 0xBA5EC2;
+        case 3:
+            return 0x7B96CD;
+        case 4:
+            return 0xC1B52A;
+        case 5:
+            return 0x46BA3A;
+        case 6:
+            return 0xD597A7;
+        case 7:
+            return 0x434343;
+        case 8:
+            return 0xA6ACAC;
+        case 9:
+            return 0x307592;
+        case 10:
+            return 0x8643BF;
+        case 11:
+            return 0x2E3B97;
+        case 12:
+            return 0x53351F;
+        case 13:
+            return 0x384B1B;
+        case 14:
+            return 0xA23732;
+        case 15:
+            return 0x1D1818;
+        case 16:    // moss
+            return 0x5B6F2E;
+        }
+
+    case BLOCK_COLORED_TERRACOTTA:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:
+            return 0x9D5021;
+        case 2:
+            return 0x925469;
+        case 3:
+            return 0x6D6987;
+        case 4:
+            return 0xB6801F;
+        case 5:
+            return 0x647230;
+        case 6:
+            return 0x9D4A4B;
+        case 7:
+            return 0x362621;
+        case 8:
+            return 0x84665D;
+        case 9:
+            return 0x535758;
+        case 10:
+            return 0x734253;
+        case 11:
+            return 0x473858;
+        case 12:
+            return 0x4A2F21;
+        case 13:
+            return 0x484F27;
+        case 14:
+            return 0x8B392B;
+        case 15:
+            return 0x21120D;
+        }
+
+    case BLOCK_STAINED_GLASS:
+    case BLOCK_STAINED_GLASS_PANE:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:
+            return 0xDFBB9D;
+        case 2:
+            return 0xCFA7DF;
+        case 3:
+            return 0xB1C5DF;
+        case 4:
+            return 0xE3E39D;
+        case 5:
+            return 0xBBD995;
+        case 6:
+            return 0xE9BBCB;
+        case 7:
+            return 0xA7A7A7;
+        case 8:
+            return 0xC5C5C5;
+        case 9:
+            return 0xA7BBC5;
+        case 10:
+            return 0xBBA1CF;
+        case 11:
+            return 0x9DA7CF;
+        case 12:
+            return 0xB1A79D;
+        case 13:
+            return 0xB1BB9D;
+        case 14:
+            return 0xC59D9D;
+        case 15:
+            return 0x959595;
+        }
+
+    case BLOCK_OAK_PLANKS:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// spruce
+            return gBlockDefinitions[BLOCK_SPRUCE_WOOD_STAIRS].pcolor;
+        case 2:	// birch
+            return gBlockDefinitions[BLOCK_BIRCH_WOOD_STAIRS].pcolor;
+        case 3:	// jungle
+            return gBlockDefinitions[BLOCK_JUNGLE_WOOD_STAIRS].pcolor;
+        case 4:	// acacia
+            return gBlockDefinitions[BLOCK_ACACIA_WOOD_STAIRS].pcolor;
+        case 5:	// dark oak
+            return gBlockDefinitions[BLOCK_DARK_OAK_WOOD_STAIRS].pcolor;
+        case 6: // Crimson Planks
+            return gBlockDefinitions[BLOCK_CRIMSON_STAIRS].pcolor;
+        case 7: // Warped Planks
+            return gBlockDefinitions[BLOCK_WARPED_STAIRS].pcolor;
+        case 8: // Mangrove Planks
+            return gBlockDefinitions[BLOCK_MANGROVE_STAIRS].pcolor;
+        case 9: // Cherry Planks
+            return gBlockDefinitions[BLOCK_CHERRY_STAIRS].pcolor;
+        case 10: // Bamboo Planks
+            return gBlockDefinitions[BLOCK_BAMBOO_STAIRS].pcolor;
+        case 11: // Bamboo Mosaic (Planks)
+            return gBlockDefinitions[BLOCK_BAMBOO_MOSAIC_STAIRS].pcolor;
+        case 12: // Pale Oak Planks
+            return gBlockDefinitions[BLOCK_PALE_OAK_STAIRS].pcolor;
+        }
+
+    case BLOCK_WOODEN_DOUBLE_SLAB:
+    case BLOCK_WOODEN_SLAB:
+        switch (dataVal & 0x7)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// spruce
+            return gBlockDefinitions[BLOCK_SPRUCE_WOOD_STAIRS].pcolor;
+        case 2:	// birch
+            return gBlockDefinitions[BLOCK_BIRCH_WOOD_STAIRS].pcolor;
+        case 3:	// jungle
+            return gBlockDefinitions[BLOCK_JUNGLE_WOOD_STAIRS].pcolor;
+        case 4:	// acacia
+            return gBlockDefinitions[BLOCK_ACACIA_WOOD_STAIRS].pcolor;
+        case 5:	// dark oak
+            return gBlockDefinitions[BLOCK_DARK_OAK_WOOD_STAIRS].pcolor;
+        case 6: // cherry
+            return gBlockDefinitions[BLOCK_CHERRY_STAIRS].pcolor;
+        case 7: // bamboo
+            return gBlockDefinitions[BLOCK_BAMBOO_STAIRS].pcolor;
+        }
+
+    case BLOCK_CRIMSON_DOUBLE_SLAB:
+    case BLOCK_CRIMSON_SLAB:
+        switch (dataVal & 0x17)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// warped
+            return 0x2D6D68;
+        case 2:	// blackstone top
+            return 0x2D282F;
+        case 3:	// polished blackstone
+            return 0x37333D;
+        case 4:	// polished blackstone brick
+            return 0x322E36;
+        case 5:	// bamboo mosaic
+            return 0xC0AC4F;
+        case 6:	// pale oak
+            return 0xE5DBDA;
+        case 7:	// resin brick
+            return 0xD05F1D;
+        case BIT_16 | 0: // cinnabar
+            return 0x995450;
+        case BIT_16 | 1: // polished_cinnabar
+            return 0x9B3C39;
+        case BIT_16 | 2: // cinnabar_bricks
+            return 0x973A38;
+        case BIT_16 | 3: // sulfur
+            return 0xBEB066;
+        case BIT_16 | 4: // polished_sulfur
+            return 0xBDAD5C;
+        case BIT_16 | 5: // sulfur_bricks
+            return 0xBCAB5C;
+        }
+
+    case BLOCK_WEEPING_VINES:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// twisting
+            return 0x148C7C;
+        case 2:	// hanging roots
+            return 0xA37661;
+        }
+
+    case BLOCK_CAVE_VINES:
+        switch (dataVal & 0x1)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1: // plant
+            return 0x6B7252;
+        }
+
+    case BLOCK_CAVE_VINES_LIT:
+        switch (dataVal & 0x1)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1: // plant berries (lit)
+            return 0x74712B;
+        }
+
+    case BLOCK_STONE:
+        switch (dataVal & 0x1f)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// granite
+            return 0xA77562;
+        case 2:	// polished granite
+            return 0x946251;
+        case 3:	// diorite
+            return 0x9B9B9E;
+        case 4:	// polished diorite
+            return 0xC9C9CD;
+        case 5:	// andesite
+            return gBlockDefinitions[BLOCK_ANDESITE_SLAB].pcolor;
+        case 6:	// polished andesite
+            return 0x7F7F84;
+        case 7: // blackstone
+            return 0x2D282F;
+        case 8: // chiseled_polished_blackstone
+            return 0x39353E;
+        case 9: // polished_blackstone
+            return 0x37333D;
+        case 10: // gilded_blackstone
+            return 0x4A392D;
+        case 11: // polished_blackstone_bricks
+            return 0x322E36;
+        case 12: // cracked_polished_blackstone_bricks
+            return 0x2F2B32;
+        case 13: // netherite_block
+            return 0x444042;
+        case 14: // ancient_debris
+            return 0x67504A;
+        case 15: // nether_gold_ore
+            return 0x7E4E31;
+        case 16: // test_instance_block
+            return 0x908C8B;
+        case 17: // cinnabar
+            return 0x995450;
+        case 18: // polished_cinnabar
+            return 0x9B3C39;
+        case 19: // cinnabar_bricks
+            return 0x973A38;
+        case 20: // chiseled_cinnabar
+            return 0x963B3A;
+        case 21: // sulfur
+            return 0xBEB066;
+        case 22: // polished_sulfur
+            return 0xBDAD5C;
+        case 23: // sulfur_bricks
+            return 0xBCAB5C;
+        case 24: // chiseled_sulfur
+            return 0xBCAD5C;
+        }
+
+    case BLOCK_GLASS:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// tinted glass
+            return 0xA2A1A2;
+        }
+
+    case BLOCK_NETHER_BRICKS:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// chiseled
+            return 0x331A1E;
+        case 2:	// cracked
+            return 0x2B1519;
+        }
+
+    case BLOCK_SOUL_SAND:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// soul soil
+            return 0x4E3B30;
+        }
+
+    case BLOCK_GLOWSTONE:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// shroomlight
+            return 0xF29C5E;
+        }
+
+    case BLOCK_DIRT:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// coarse dirt
+            return 0x7D5A3F;
+        case 2:	// podzol
+            return 0x5F4118;
+        case SNOWY_BIT | 2:	// podzol with snow
+            return 0xFCFFFF;
+        case 3:	// crimson nylium
+            return 0x852727;
+        case 4:	// warped nylium
+            return 0x347568;
+        case 5: // reinforced deepslate
+            return 0x5B6057;
+        }
+
+    case BLOCK_CRYING_OBSIDIAN:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1: // Sculk Catalyst
+            return 0x143036;
+        }
+
+    case BLOCK_PINK_PETALS:
+        switch (dataVal & 0x30)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 16: // Leaf Litter
+            return 0x9f744a;
+        case 32: // Wildflowers
+            return 0xEFD897;
+        }
+
+    case BLOCK_NETHER_WART_BLOCK:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// warped wart block
+            return 0x177A7A;
+        }
+
+    case BLOCK_SAND:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// red sand
+            return 0xA85420;
+        }
+
+    case BLOCK_TNT:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// target
+            return 0xE7C7BE;
+        }
+
+    case BLOCK_RED_MUSHROOM:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:
+            return 0x9D3F2B;
+        case 2:
+            return 0x777965;
+        }
+
+    case BLOCK_FIRE:
+        switch (dataVal & BIT_16)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case BIT_16:	// soul fire
+            return 0x6BD0D5;
+        }
+
+    case BLOCK_LOG:
+    case BLOCK_STRIPPED_OAK:
+    case BLOCK_STRIPPED_OAK_WOOD:
+        switch (dataVal & 0x3)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// spruce
+            return 0x291806;
+        case 2:	// birch
+            return 0xE2E8DF;
+        case 3:	// jungle
+            return 0x584419;
+        }
+
+    case BLOCK_BONE_BLOCK:
+        switch (dataVal & 0x13)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// basalt
+            return 0x565659;
+        case 2:	// polished basalt
+            return 0x676667;
+        case 3:
+        case BIT_16: // (infested) deepslate
+            return 0x5e5e5e;
+        }
+
+    case BLOCK_LEAVES:
+        switch (dataVal & 0x3)
+        {
+        default:
+        case 0:	// oak or mangrove
+        case 3:	// jungle
+            // For biome-affected entries, return the base definition color
+            return gBlockDefinitions[type].color;
+        case 1:	// spruce
+            return 0x3D623D;
+        case 2:	// birch
+            return 0x6B8D46;
+        }
+
+    case BLOCK_AD_LEAVES:
+        if (dataVal & 0x2) {
+            // azalea, flowering or not
+            return (dataVal & 0x1) ? 0x6B7252 : 0x5D762C;
+        }
+        else {
+            // acacia / dark oak - biome-affected, return base color
+            return gBlockDefinitions[type].color;
+        }
+
+    case BLOCK_MANGROVE_LEAVES:
+        switch (dataVal & 0x3)
+        {
+        default:
+        case 0:
+            // mangrove, affected by biome - return base color
+            return gBlockDefinitions[type].color;
+        case 1:
+            // cherry
+            return 0xE9B1CC;
+        case 2:
+            // pale oak
+            return 0x7A7F77;
+        }
+
+    case BLOCK_GRASS:
+        switch (dataVal & 0xf)
+        {
+        case 0: // dead bush
+            return 0x946428;
+        default:
+            assert(0);
+        case 1:	// grass
+        case 2:	// fern
+        case 6:	// bush
+            // biome-affected grass/fern - return base color
+            return gBlockDefinitions[type].color;
+        case 3:	// nether sprouts
+            return 0x149985;
+        case 4:	// crimson roots
+            return 0x83092B;
+        case 5:	// warped roots
+            return 0x148E7E;
+        case 7:	// cactus_flower
+            return 0xD67D89;
+        case 8:	// short_dry_grass
+            return 0xBCA272;
+        case 9:	// tall_dry_grass
+            return 0xC6AF80;
+        case 10:	// firefly_bush
+            return 0x62592E;
+        }
+
+    case BLOCK_GRASS_BLOCK:
+        // biome-affected, skip
+        if (dataVal & SNOWY_BIT) {
+            return 0xFCFFFF;
+        }
+        return gBlockDefinitions[type].color;
+
+    case BLOCK_SCULK_SENSOR:
+        if (dataVal & 0x4) {
+            // calibrated top
+            return 0xCEA9E2;
+        }
+        return gBlockDefinitions[type].color;
+
+    case BLOCK_AD_LOG:
+    case BLOCK_STRIPPED_ACACIA:
+    case BLOCK_STRIPPED_ACACIA_WOOD:
+        switch (dataVal & 0x3)
+        {
+        default:
+        case 0: // acacia
+            return gBlockDefinitions[type].color;
+        case 1:	// dark oak
+            return 0x342816;
+        case 2:	// crimson
+            return 0x7B3953;
+        case 3:	// warped
+            return 0x35837F;
+        }
+
+    case BLOCK_STONE_DOUBLE_SLAB:
+    case BLOCK_STONE_SLAB:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+        case 8:	// full stone
+            return gBlockDefinitions[type].color;
+        case 1:	// sandstone
+        case 9:	// full sandstone
+            return gBlockDefinitions[BLOCK_SANDSTONE].pcolor;
+        case 2:	// wooden
+            return gBlockDefinitions[BLOCK_OAK_PLANKS].pcolor;
+        case 3:	// cobblestone
+        case 11:	// cobblestone
+            return gBlockDefinitions[BLOCK_COBBLESTONE].pcolor;
+        case 4:	// bricks
+        case 12:	// bricks
+            return gBlockDefinitions[BLOCK_BRICK].pcolor;
+        case 5:	// stone brick
+        case 13:	// stone brick
+            return gBlockDefinitions[BLOCK_STONE_BRICKS].pcolor;
+        case 6:	// nether brick
+        case 14:	// nether brick
+            return gBlockDefinitions[BLOCK_NETHER_BRICKS].pcolor;
+        case 7:	// quartz
+        case 15:	// quartz
+            return gBlockDefinitions[BLOCK_QUARTZ_BLOCK].pcolor;
+        case 10:	// tile quartz or upper wooden slab
+            return gBlockDefinitions[(type == BLOCK_STONE_DOUBLE_SLAB) ? BLOCK_QUARTZ_BLOCK : BLOCK_OAK_PLANKS].pcolor;
+        }
+
+    case BLOCK_RED_SANDSTONE_DOUBLE_SLAB:
+    case BLOCK_RED_SANDSTONE_SLAB:
+        switch (dataVal & 0x7)
+        {
+        default:
+        case 0:
+        case 1:	// cut red sandstone
+        case 2:	// smooth red sandstone
+            return gBlockDefinitions[type].color;
+        case 3: // cut sandstone
+        case 4: // smooth sandstone
+            return gBlockDefinitions[BLOCK_SANDSTONE].pcolor;
+        case 5:	// granite
+            return 0xA77562;
+        case 6:	// polished granite
+            return 0x946251;
+        case 7:	// smooth quartz
+            return gBlockDefinitions[BLOCK_QUARTZ_BLOCK].pcolor;
+        }
+
+    case BLOCK_ANDESITE_DOUBLE_SLAB:
+    case BLOCK_ANDESITE_SLAB:
+        switch (dataVal & 0x7)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// polished andesite
+            return 0x7F7F84;
+        case 2:	// diorite
+            return 0x9B9B9E;
+        case 3: // polished diorite slab
+            return 0xC9C9CD;
+        case 4: // end stone brick slab
+            return gBlockDefinitions[BLOCK_END_BRICKS].pcolor;
+        case 5:	// stone slab
+            return gBlockDefinitions[BLOCK_STONE].pcolor;
+        case 6: // mangrove
+            return 0x773932;
+        case 7: // mud brick
+            return 0x8B6950;
+        }
+
+    case BLOCK_CUT_COPPER_DOUBLE_SLAB:
+    case BLOCK_CUT_COPPER_SLAB:
+        switch (dataVal & 0x17)
+        {
+        default:
+        case 0:
+        case 4:	// Waxed Cut Copper Slab
+            return gBlockDefinitions[type].color;
+        case 1:	// Exposed Cut Copper Slab
+        case 5:	// Waxed Exposed Cut Copper Slab
+            return 0xA37E69;
+        case 2:	// Weathered Cut Copper Slab
+        case 6:	// Waxed Weathered Cut Copper Slab
+            return 0x6F936E;
+        case 3: // Oxidized Cut Copper Slab
+        case 7:	// Waxed Oxidized Cut Copper Slab
+            return 0x54A587;
+        case BIT_16 | 0: // Cobbled Deepslate Slab
+            return 0x515153;
+        case BIT_16 | 1: // Polished Deepslate Slab
+            return 0x4C4C4C;
+        case BIT_16 | 2: // Deepslate Brick Slab
+            return 0x4B4B4B;
+        case BIT_16 | 3: // Deepslate Tile Slab
+            return 0x39393A;
+        case BIT_16 | 4: // Tuff Slab
+            return 0x6F6F69;
+        case BIT_16 | 5: // Polished Tuff Slab
+            return 0x636965;
+        case BIT_16 | 6: // Tuff Brick Slab
+            return 0x656962;
+        }
+
+    case BLOCK_POPPY:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0: // poppy
+            return gBlockDefinitions[type].color;
+        case 1:	// blue orchid
+            return 0x26ABF8;
+        case 2:	// allium
+            return 0xB562F8;
+        case 3:	// azure bluet
+            return 0xE1E7EF;
+        case 4:	// red tulip
+            return 0xC02905;
+        case 5:	// orange tulip
+            return 0xDE6E20;
+        case 6:	// white tulip
+            return 0xE4E4E4;
+        case 7:	// pink tulip
+            return 0xE7BBE7;
+        case 8:	// oxeye daisy
+            return 0xE7D941;
+        case 9: // cornflower
+            return 0x547CAB;
+        case 10: // lily of the valley
+            return 0x93B588;
+        case 11: // wither rose
+            return 0x2D3119;
+        // not needed in theory, but could be used for export color for potted plants:
+        case 12: // crimson fungus
+            return 0x9D3F2B;
+        case 13: // warped fungus
+            return 0x777965;
+        case 14: // crimson roots
+            return 0x83092B;
+        case 15: // warped roots
+            return 0x148E7E;
+        }
+
+    case BLOCK_DANDELION:
+        switch (dataVal & 0x7)
+        {
+        default:
+        case 0: // dandelion
+            return gBlockDefinitions[type].color;
+        case 1:	// torchflower
+            return 0xF6B927;
+        case 2: // closed_eyeblossom
+            return 0xBCAEB9;
+        case 3: // opened_eyeblossom
+            return 0xEEEEEE;
+        case 4: // pale oak sapling
+            return 0x9FA498;
+        case 5: // golden dandelion
+            return 0xAD884C;
+        }
+
+    case BLOCK_LIGHTNING_ROD:
+    case BLOCK_WAXED_LIGHTNING_ROD:
+        switch (dataVal & 0x30)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case BIT_16:
+            return 0xA3796A;
+        case BIT_32:
+            return 0x519E82;
+        case BIT_32 | BIT_16:
+            return 0x64926C;
+        }
+
+    case BLOCK_DOUBLE_FLOWER:
+        // masking just in case it's a top half (and probably bogus)
+        switch (dataVal & 0x7)
+        {
+        case 0:	// sunflower
+            return 0xEAD31F;
+        case 1:	// lilac
+            return 0xB79ABB;
+        default:
+        case 2:	// tall grass - biome-affected
+            return gBlockDefinitions[type].color;
+        case 3:	// large fern - biome-affected
+            return gBlockDefinitions[type].color;
+        case 4:	// rose bush
+            return 0xF4210B;
+        case 5:	// peony
+            return 0xE3BCF4;
+        case 6: // pitcher plant
+            return 0x7D9BC2;
+        }
+
+    case BLOCK_SPONGE:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// wet sponge
+            return 0x999829;
+        }
+
+    case BLOCK_CONCRETE:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:
+            return 0xE06101;
+        case 2:
+            return 0xA9309F;
+        case 3:
+            return 0x2489C7;
+        case 4:
+            return 0xF1AF15;
+        case 5:
+            return 0x5EA919;
+        case 6:
+            return 0xD6658F;
+        case 7:
+            return 0x373A3E;
+        case 8:
+            return 0x7D7D73;
+        case 9:
+            return 0x157788;
+        case 10:
+            return 0x64209C;
+        case 11:
+            return 0x2D2F8F;
+        case 12:
+            return 0x603C20;
+        case 13:
+            return 0x495B24;
+        case 14:
+            return 0x8E2121;
+        case 15:
+            return 0x080A0F;
+        }
+
+    case BLOCK_CONCRETE_POWDER:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:
+            return 0xE38423;
+        case 2:
+            return 0xC155B9;
+        case 3:
+            return 0x4BB5D6;
+        case 4:
+            return 0xE9C739;
+        case 5:
+            return 0x7EBD2B;
+        case 6:
+            return 0xE59AB6;
+        case 7:
+            return 0x4D5155;
+        case 8:
+            return 0x9B9B95;
+        case 9:
+            return 0x25959D;
+        case 10:
+            return 0x8438B2;
+        case 11:
+            return 0x474AA7;
+        case 12:
+            return 0x7E5536;
+        case 13:
+            return 0x61782D;
+        case 14:
+            return 0xA93633;
+        case 15:
+            return 0x1B1C21;
+        }
+
+    case BLOCK_PURPUR_DOUBLE_SLAB:
+    case BLOCK_PURPUR_SLAB:
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+        case 0:	// full stone
+        case 1:	// purpur, just in case
+            return gBlockDefinitions[type].color;
+        case 2:	// prismarine
+            return gBlockDefinitions[BLOCK_PRISMARINE].pcolor;
+        case 3:	// prismarine block
+            return gBlockDefinitions[BLOCK_PRISMARINE_BRICK_STAIRS].pcolor;
+        case 4:	// dark prismarine
+            return gBlockDefinitions[BLOCK_DARK_PRISMARINE_STAIRS].pcolor;
+        case 5:	// red nether brick
+            return gBlockDefinitions[BLOCK_RED_NETHER_BRICK].pcolor;
+        case 6:	// mossy stone brick
+            return 0x767B6E;
+        case 7:	// mossy cobblestone
+            return gBlockDefinitions[BLOCK_MOSSY_COBBLESTONE].pcolor;
+        }
+
+    case BLOCK_CORAL_BLOCK:
+    case BLOCK_CORAL:
+    case BLOCK_CORAL_FAN:
+    case BLOCK_CORAL_WALL_FAN:
+        switch (dataVal & 0x7)
+        {
+        default:
+            assert(0);
+        case 0:	// tube coral - as is
+            return gBlockDefinitions[type].color;
+        case 1:	// brain
+            return 0xC85D9B;
+        case 2:	// bubble
+            return 0xA61EA2;
+        case 3:	// fire
+            return 0xAC282F;
+        case 4:	// horn
+            return 0xD2BE40;
+        }
+
+    case BLOCK_SIGN_POST:
+        switch (dataVal & (BIT_16 | BIT_32))
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case BIT_16:	// spruce
+            return 0x745632;
+        case BIT_32:	// birch
+            return 0xC2B17A;
+        case BIT_32 | BIT_16:	// jungle
+            return 0xA37654;
+        }
+
+    case BLOCK_ACACIA_SIGN_POST:
+        switch (dataVal & (BIT_16 | BIT_32))
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case BIT_16:	// dark oak
+            return 0x442C15;
+        case BIT_32:	// crimson
+            return 0x7B3953;
+        case BIT_32 | BIT_16:	// warped
+            return 0x35837F;
+        }
+
+    case BLOCK_MANGROVE_SIGN_POST:
+        switch (dataVal & (BIT_16 | BIT_32))
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case BIT_16:	// cherry
+            return gBlockDefinitions[BLOCK_CHERRY_STAIRS].pcolor;
+        case BIT_32:	// bamboo
+            return gBlockDefinitions[BLOCK_BAMBOO_STAIRS].pcolor;
+        case BIT_32 | BIT_16:	// pale oak
+            return gBlockDefinitions[BLOCK_PALE_OAK_STAIRS].pcolor;
+        }
+
+    case BLOCK_WALL_SIGN:
+        switch (dataVal & (BIT_8 | BIT_16 | BIT_32))
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case BIT_8:	// spruce
+            return 0x745632;
+        case BIT_16:	// birch
+            return 0xC2B17A;
+        case BIT_16 | BIT_8:	// jungle
+            return 0xA37654;
+        case BIT_32:	// acacia
+            return 0xA95B33;
+        case BIT_32 | BIT_8:	// dark oak
+            return 0x442C15;
+        case BIT_32 | BIT_16:   // crimson
+            return 0x7B3953;
+        case BIT_32 | BIT_16 | BIT_8:   // warped
+            return 0x35837F;
+        }
+
+    case BLOCK_MANGROVE_WALL_SIGN:
+        switch (dataVal & (BIT_8 | BIT_16 | BIT_32))
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case BIT_8:	// cherry
+            return 0xE3B4AE;
+        case BIT_16:	// bamboo
+            return 0xC4AF52;
+        case BIT_16 | BIT_8:	// pale oak
+            return 0xE5DBDA;
+        }
+
+    case BLOCK_SMOOTH_STONE:
+        switch (dataVal & 0x3)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1: // smooth sandstone
+            return gBlockDefinitions[BLOCK_SANDSTONE].pcolor;
+        case 2: // red sandstone
+            return gBlockDefinitions[BLOCK_RED_SANDSTONE].pcolor;
+        case 3: // quartz
+            return gBlockDefinitions[BLOCK_QUARTZ_BLOCK].pcolor;
+        }
+
+    case BLOCK_COBBLESTONE_WALL:
+        switch (dataVal & 0x1f) {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1: // mossy cobblestone
+            return gBlockDefinitions[BLOCK_MOSSY_COBBLESTONE].pcolor;
+        case 2: // brick wall
+            return gBlockDefinitions[BLOCK_BRICK].pcolor;
+        case 3: // granite wall
+            return 0xA77562;
+        case 4: // diorite wall
+            return 0x9B9B9E;
+        case 5: // andesite wall
+            return gBlockDefinitions[BLOCK_ANDESITE_SLAB].pcolor;
+        case 6: // prismarine wall
+            return gBlockDefinitions[BLOCK_PRISMARINE].pcolor;
+        case 7: // stone brick wall
+            return gBlockDefinitions[BLOCK_STONE_BRICKS].pcolor;
+        case 8: // mossy stone brick wall
+            return 0x767B6E;
+        case 9: // end stone brick wall
+            return 0xDBE2A4;
+        case 10: // nether brick wall
+            return gBlockDefinitions[BLOCK_NETHER_BRICKS].pcolor;
+        case 11: // red nether brick wall
+            return gBlockDefinitions[BLOCK_RED_NETHER_BRICK].pcolor;
+        case 12: // sandstone wall
+            return gBlockDefinitions[BLOCK_SANDSTONE].pcolor;
+        case 13: // red sandstone wall
+            return gBlockDefinitions[BLOCK_RED_SANDSTONE].pcolor;
+        case 14: // blackstone wall
+            return 0x2D272E;
+        case 15: // polished blackstone wall
+            return 0x37333D;
+        case 16: // polished blackstone brick wall
+            return 0x322E36;
+        case 17: // Cobbled Deepslate
+            return 0x515153;
+        case 18: // Polished Deepslate
+            return 0x4C4C4C;
+        case 19: // Deepslate Bricks
+            return 0x4B4B4B;
+        case 20: // Deepslate Tiles
+            return 0x39393A;
+        case 21: // Mud brick wall
+            return 0x8B6950;
+        case 22: // Tuff wall
+            return 0x6F6F69;
+        case 23: // Polished Tuff wall
+            return 0x636965;
+        case 24: // Tuff Brick wall
+            return 0x656962;
+        case 25: // Resin Brick wall
+            return 0xD05F1D;
+        case 26: // cinnabar
+            return 0x995450;
+        case 27: // polished_cinnabar
+            return 0x9B3C39;
+        case 28: // cinnabar_bricks
+            return 0x973A38;
+        case 29: // sulfur
+            return 0xBEB066;
+        case 30: // polished_sulfur
+            return 0xBDAD5C;
+        case 31: // sulfur_bricks
+            return 0xBCAB5C;
+        }
+
+    case BLOCK_PRISMARINE:
+        switch (dataVal & 0xf) {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1: // bricks
+            return gBlockDefinitions[BLOCK_PRISMARINE_BRICK_STAIRS].pcolor;
+        case 2:	// dark prismarine
+            return gBlockDefinitions[BLOCK_DARK_PRISMARINE_STAIRS].pcolor;
+        }
+
+    case BLOCK_FURNACE:
+    case BLOCK_BURNING_FURNACE:
+        switch (dataVal & (BIT_32 | BIT_16)) {
+        default:
+        case 0x0:
+            return gBlockDefinitions[type].color;
+        case BIT_16:	// loom
+            return 0x9A836C;
+        case BIT_32:	// smoker
+            return 0x5C5A59;
+        case BIT_32 | BIT_16:	// blast furnace
+            return 0x535253;
+        }
+
+    case BLOCK_BOOKSHELF:
+        if (dataVal & BIT_16) {
+            return 0xB3925A;
+        }
+        return gBlockDefinitions[type].color;
+
+    case BLOCK_CRAFTING_TABLE:
+        switch (dataVal & 0xf) {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1: // cartography
+            return 0x81756D;
+        case 2:	// fletching
+            return 0xC8B78C;
+        case 3:	// smithing
+            return 0x3B3C49;
+        case 4:	// lodestone
+            return 0x7D7E80;
+        }
+
+    case BLOCK_BEE_NEST:
+        if (dataVal & BIT_32) {
+            // beehive
+            return 0xB5935B;
+        }
+        return gBlockDefinitions[type].color;
+
+    case BLOCK_COLORED_CANDLE:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:
+            return 0xDD5F00;
+        case 2:
+            return 0xA02A98;
+        case 3:
+            return 0x2089C9;
+        case 4:
+            return 0xCFA12C;
+        case 5:
+            return 0x5EAD14;
+        case 6:
+            return 0xD15F8B;
+        case 7:
+            return 0x4E5D5E;
+        case 8:
+            return 0x73766C;
+        case 9:
+            return 0x0F7877;
+        case 10:
+            return 0x6620A0;
+        case 11:
+            return 0x374A9F;
+        case 12:
+            return 0x6B4224;
+        case 13:
+            return 0x445B12;
+        case 14:
+            return 0x992421;
+        case 15:
+            return 0x201F32;
+        }
+
+    case BLOCK_LIT_COLORED_CANDLE:
+        switch (dataVal & 0xf)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:
+            return 0xFFDA4B;
+        case 2:
+            return 0xFF9CC2;
+        case 3:
+            return 0xBFF0E1;
+        case 4:
+            return 0xFDFF9A;
+        case 5:
+            return 0xD2DA3B;
+        case 6:
+            return 0xFFDDBF;
+        case 7:
+            return 0xEDC591;
+        case 8:
+            return 0xFFE5A8;
+        case 9:
+            return 0x8ADCB0;
+        case 10:
+            return 0xCB2172;
+        case 11:
+            return 0x6A83F5;
+        case 12:
+            return 0xFFB55F;
+        case 13:
+            return 0xC0B419;
+        case 14:
+            return 0xFF9456;
+        case 15:
+            return 0xCF5C20;
+        }
+
+    case BLOCK_AMETHYST:
+        switch (dataVal & 0x3f)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// amethyst cluster
+            return 0x8E69BF;
+        case 2:	// calcite
+            return 0xE0E1DE;
+        case 3:	// tuff
+            return 0x6F6F69;
+        case 4:	// Dripstone Block
+            return 0x886E5E;
+        case 5:	// Copper Ore
+            return 0x936C45;
+        case 6:	// Deepslate Copper Ore
+            return 0x63421F;
+        case 7: // Block of Copper
+        case 15: // Waxed Block of Copper
+            return 0xC26D52;
+        case 8: // Exposed Copper
+        case 16: // Waxed Exposed Copper
+            return 0xA37E69;
+        case 9: // Weathered Copper
+        case 17: // Waxed Weathered Copper
+            return 0x6F936E;
+        case 10: // Oxidized Copper
+        case 18: // Waxed Oxidized Copper
+            return 0x54A587;
+        case 11: // Cut Copper
+        case 19: // Waxed Cut Copper
+            return 0xC16D53;
+        case 12: // Exposed Cut Copper
+        case 20: // Waxed Exposed Cut Copper
+            return 0x9E7B67;
+        case 13: // Weathered Cut Copper
+        case 21: // Waxed Weathered Cut Copper
+            return 0x6F936E;
+        case 14: // Oxidized Cut Copper
+        case 22: // Waxed Oxidized Cut Copper
+            return 0x529D81;
+        case 23: // Moss Block
+            return 0x5B6F2E;
+        case 24: // Rooted Dirt
+            return 0x946B52;
+        case 25: // Powder Snow
+            return 0xF8FDFD;
+        case 26: // Cobbled Deepslate
+            return 0x515153;
+        case 27: // Chiseled Deepslate
+            return 0x39393A;
+        case 28: // Polished Deepslate
+            return 0x4C4C4C;
+        case 29: // Deepslate Bricks
+            return 0x4B4B4B;
+        case 30: // Deepslate Tiles
+            return 0x39393A;
+        case 31: // Cracked Deepslate Bricks
+            return 0x454546;
+        case 32: // Cracked Deepslate Tiles
+            return 0x373737;
+        case 33: // Smooth Basalt
+            return 0x4B4B4F;
+        case 34: // Block of Raw Iron
+            return 0xAC8D74;
+        case 35: // Block of Raw Copper
+            return 0xA36D53;
+        case 36: // Block of Raw Gold
+            return 0xE0B03E;
+        case 37: // Deepslate Coal Ore
+            return 0x515152;
+        case 38: // Deepslate Iron Ore
+            return 0x756A63;
+        case 39: // Deepslate Gold Ore
+            return 0x847256;
+        case 40: // Deepslate Redstone Ore
+            return 0x785152;
+        case 41: // Deepslate Emerald Ore
+            return 0x5A7760;
+        case 42: // Deepslate Lapis Lazuli Ore
+            return 0x575F7F;
+        case 43: // Deepslate Diamond Ore
+            return 0x5B7876;
+        case 44: // Mud
+            return 0x3D3A3D;
+        case 45: // Mud Bricks
+            return 0x8B6950;
+        case 46: // Packed Mud
+            return 0x8F6B50;
+        case 47: // Sculk
+            return 0x0E2025;
+        case 48: // Polished Tuff
+            return 0x636965;
+        case 49:
+        case 53: // Chiseled Copper / Waxed Chiseled Copper
+            return 0xBA674D;
+        case 50:
+        case 54: // Exposed Chiseled Copper / Waxed Exposed Chiseled Copper
+            return 0x9E7866;
+        case 51:
+        case 55: // Weathered Chiseled Copper / Waxed Weathered Chiseled Copper
+            return 0x6A9A73;
+        case 52:
+        case 56: // Oxidized Chiseled Copper / Waxed Oxidized Chiseled Copper
+            return 0x55A587;
+        case 57: // Tuff Bricks
+            return 0x656962;
+        case 58: // chiseled_tuff_top
+            return 0x61655E;
+        case 59: // chiseled_tuff_bricks_top
+            return 0x71736C;
+        case 60: // pale_moss_block
+            return 0x6C726A;
+        case 61: // chiseled_resin_bricks
+            return 0xCB5B1D;
+        case 62: // resin_block
+            return 0xDA681F;
+        case 63: // resin_bricks
+            return 0xD05F1D;
+        }
+
+    case BLOCK_AZALEA:
+        switch (dataVal & 0x1)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// flowering azalea
+            return 0x757B54;
+        }
+
+    case BLOCK_FROGLIGHT:
+        switch (dataVal & 0x3)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// Verdant Froglight
+            return 0xF6F1F0;
+        case 2:	// Pearlescent Froglight
+            return 0xE7F5E6;
+        }
+
+    case BLOCK_MANGROVE_LOG:
+    case BLOCK_STRIPPED_MANGROVE:
+    case BLOCK_STRIPPED_MANGROVE_WOOD:
+        switch (dataVal & 0x3)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// cherry
+            return 0xCA9C96;
+        case 2:	// pale oak
+            return 0xD1C8C7;
+        }
+
+    case BLOCK_HAY:
+        switch (dataVal & 0x3)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// block of bamboo
+            return 0x909143;
+        case 2:	// block of stripped bamboo
+            return 0xB8A44D;
+        }
+
+    case BLOCK_SUSPICIOUS_GRAVEL:
+        switch (dataVal & 0x4)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 4:	// suspicious sand
+            return 0xDACDA1;
+        }
+
+    case BLOCK_OAK_WALL_HANGING_SIGN:
+        switch (dataVal & (0xC | BIT_16 | BIT_32))
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1 << 2:	// spruce
+            return 0x745A35;
+        case 2 << 2:	// birch
+            return 0xC5B077;
+        case 3 << 2:	// jungle
+            return 0xAC8555;
+        case 4 << 2:	// acacia
+            return 0xAF5D3C;
+        case 5 << 2:	// dark oak
+            return 0x493924;
+        case 6 << 2:   // crimson
+            return 0x8A3A5A;
+        case 7 << 2:   // warped
+            return 0x3A9794;
+        case 8 << 2:    // mangrove
+            return 0x783730;
+        case 9 << 2:	// cherry
+            return 0xDDA7A0;
+        case 10 << 2:	// bamboo
+            return 0xC4AF52;
+        case 11 << 2:	// pale oak
+            return 0xE5DBDA;
+        }
+
+    case BLOCK_OAK_HANGING_SIGN:
+        if (dataVal & BIT_32) {
+            return 0x745632;   // spruce
+        }
+        return gBlockDefinitions[type].color;
+
+    case BLOCK_BIRCH_HANGING_SIGN:
+        if (dataVal & BIT_32) {
+            return 0xAC8555;   // jungle
+        }
+        return gBlockDefinitions[type].color;
+
+    case BLOCK_ACACIA_HANGING_SIGN:
+        if (dataVal & BIT_32) {
+            return 0x745632;   // dark oak
+        }
+        return gBlockDefinitions[type].color;
+
+    case BLOCK_CRIMSON_HANGING_SIGN:
+        if (dataVal & BIT_32) {
+            return 0x745632;   // warped
+        }
+        return gBlockDefinitions[type].color;
+
+    case BLOCK_MANGROVE_HANGING_SIGN:
+        if (dataVal & BIT_32) {
+            return 0x745632;   // mangrove
+        }
+        return gBlockDefinitions[type].color;
+
+    case BLOCK_TRIAL_SPAWNER:
+        switch (dataVal & 0x7)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:	// active
+        case 2: // waiting_for_player
+            return 0x545863;
+        case 3:	// ejecting
+            return 0x4E484F;
+        case 4:	// ominous inactive
+            return 0x355161;
+        case 5:	// ominous active
+        case 6:	// ominous waiting_for_player
+            return 0x365E6C;
+        case 7:	// ominous ejecting
+            return 0x2B505A;
+        }
+
+    case BLOCK_VAULT:
+        switch (dataVal & 0x1C)
+        {
+        default:
+        case 0:     // inactive
+        case 0x8:	// active
+        case 0x10:	// unlocking
+            return gBlockDefinitions[type].color;
+        case 4:	    // ominous inactive
+        case 0xC:	// ominous active
+        case 0x14:	// ominous unlocking
+            return 0x3B4245;
+        case 0x18:	// ejecting
+            return 0x3C403F;
+        case 0x1C:	// ominous ejecting
+            return 0x4A4E4B;
+        }
+
+    case BLOCK_COPPER_BULB:
+        switch (dataVal & 0xf) {
+        default:
+        case 0:
+        case 4: // Waxed Copper Bulb
+            return gBlockDefinitions[type].color;
+        case 1:
+        case 5: // Exposed / Waxed Exposed Copper Bulb
+            return 0x8E6E5D;
+        case 2:
+        case 6: // Weathered / Waxed Weathered Copper Bulb
+            return 0x5F8467;
+        case 3:
+        case 7: // Oxidized / Waxed Oxidized Copper Bulb
+            return 0x498B73;
+        case 0x8 | 0:
+        case 0x8 | 4: // lit Waxed Copper Bulb
+            return 0xDCA478;
+        case 0x8 | 1:
+        case 0x8 | 5: // lit Exposed / Waxed Exposed Copper Bulb
+            return 0xC9976C;
+        case 0x8 | 2:
+        case 0x8 | 6: // lit Weathered / Waxed Weathered Copper Bulb
+            return 0xABA067;
+        case 0x8 | 3:
+        case 0x8 | 7: // lit Oxidized / Waxed Oxidized Copper Bulb
+            return 0x989E70;
+        }
+
+    case BLOCK_COPPER_GOLEM_STATUE:
+    case BLOCK_WAXED_COPPER_GOLEM_STATUE:
+        // Tint by oxidation only (bits 0x30) - TODOTODO: get from actual textures
+        switch ((dataVal >> 4) & 0x3) {
+        default:
+        case 0: return gBlockDefinitions[type].color;	// copper
+        case 1: return 0x8E6E5D;	// exposed
+        case 2: return 0x5F8467;	// weathered
+        case 3: return 0x498B73;	// oxidized
+        }
+
+    case BLOCK_COPPER_GRATE:
+        switch (dataVal & 0x7) {
+        default:
+        case 0:
+        case 4: // Waxed Copper Grate
+            return gBlockDefinitions[type].color;
+        case 1:
+        case 5: // Exposed / Waxed Exposed Copper Grate
+            return 0xA47F6A;
+        case 2:
+        case 6: // Weathered / Waxed Weathered Copper Grate
+            return 0x54A486;
+        case 3:
+        case 7: // Oxidized / Waxed Oxidized Copper Grate
+            return 0x6B9B72;
+        }
+
+    case BLOCK_STONE_PRESSURE_PLATE:
+        switch ((dataVal & 0x7e) >> 1) {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1: // Spruce Pressure Plate
+            return 0x6B5030;
+        case 2: // Birch Pressure Plate
+            return 0x9E7250;
+        case 3: // Jungle Pressure Plate
+            return 0xC5B57C;
+        case 4: // Acacia Pressure Plate
+            return 0xAB5D34;
+        case 5: // Dark Oak Pressure Plate
+            return 0x3F2813;
+        case 6: // Crimson Pressure Plate
+            return 0x693249;
+        case 7: // Warped Pressure Plate
+            return 0x2D6D68;
+        case 8: // Polished Blackstone Pressure Plate
+            return 0x37333D;
+        case 9: // Mangrove Pressure Plate
+            return 0x773932;
+        case 10: // Cherry Pressure Plate
+            return 0xE3B4AE;
+        case 11: // Bamboo Pressure Plate
+            return 0xC4AF52;
+        case 12: // Pale Oak Pressure Plate
+            return 0xE5DBDA;
+        }
+
+    case BLOCK_COPPER_BARS:
+    case BLOCK_WAXED_COPPER_BARS:
+        switch ((dataVal & 0x30) >> 4) {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1: // Exposed Copper Bars
+            return 0x8A6D5B;
+        case 2: // Weathered Copper Bars
+            return 0x417D66;
+        case 3: // Oxidized Copper Bars
+            return 0x587E5F;
+        }
+
+    case BLOCK_CHAIN:
+        switch (dataVal & 0x33) {
+        default:
+        case 0: // iron chain
+            return gBlockDefinitions[type].color;
+        case 1:
+        case BIT_16 | 1: // Copper Chain
+            return 0x995038;
+        case 2:
+        case BIT_16 | 2: // Exposed Copper Chain
+            return 0x816754;
+        case 3:
+        case BIT_16 | 3: // Weathered Copper Chain
+            return 0x3E7764;
+        case BIT_16:
+        case BIT_32: // Oxidized Copper Chain
+            return 0x4B6E5C;
+        }
+
+    case BLOCK_LANTERN:
+        switch (dataVal & 0x1E)
+        {
+        default:
+        case 0: // normal Lantern
+            return gBlockDefinitions[type].color;
+        case 1 << 1: // Soul Lantern
+            return 0x517782;
+        case 2 << 1:
+        case 6 << 1: // Copper Lantern
+            return 0xA37D5B;
+        case 3 << 1:
+        case 7 << 1: // Exposed Copper Lantern
+            return 0x9A8D70;
+        case 4 << 1:
+        case 8 << 1: // Weathered Copper Lantern
+            return 0x5C9476;
+        case 5 << 1:
+        case 9 << 1: // Oxidized Copper Lantern
+            return 0x6B8F6C;
+        }
+
+    case BLOCK_COPPER_CHEST:
+    case BLOCK_WAXED_COPPER_CHEST:
+        switch (dataVal & 0x20) {
+        default:
+        case 0: // default copper chest
+            return gBlockDefinitions[type].color;
+        case 0x20: // Exposed Copper Chest
+            return 0x9F7866;
+        }
+
+    case BLOCK_OXIDIZED_COPPER_CHEST:
+    case BLOCK_WAXED_OXIDIZED_COPPER_CHEST:
+        switch (dataVal & 0x20) {
+        default:
+        case 0: // default Oxidised chest
+            return gBlockDefinitions[type].color;
+        case 0x20: // Weathered Copper Chest
+            return 0x69976B;
+        }
+
+    case BLOCK_ACACIA_SHELF:
+        switch ((dataVal & 0x38) >> 3)
+        {
+        default:
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:
+            return 0xC2AE75;
+        case 2:
+            return 0xD69194;
+        case 3:
+            return 0x8C3A5B;
+        case 4:
+            return 0x483823;
+        case 5:
+            return 0xAB8455;
+        case 6:
+            return 0x76362F;
+        case 7:
+            return 0xB08E55;
+        }
+
+    case BLOCK_PALE_OAK_SHELF:
+        switch ((dataVal & 0x28) >> 3)
+        {
+        default:
+            assert(0);
+        case 0:
+            return gBlockDefinitions[type].color;
+        case 1:
+            return 0x3A9793;
+        case 2:
+            return 0xC3AF51;
+        case 3:
+            return 0x6F5734;
+        }
+
+    case BLOCK_POINTED_DRIPSTONE:
+        switch (dataVal & BIT_16)
+        {
+        default:
+            assert(0);
+        case 0:
+            return gBlockDefinitions[type].color;
+        case BIT_16:
+            return 0xB8AC5F;
+        }
+        break;
+
+    default:
+        // Everything else
+        color = gBlockDefinitions[type].color;
+        break;
+    }
+
+    return color;
+}

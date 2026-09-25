@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 水印包装层的标记 id：仅用于判断界面是否已经叠加过水印 -->
+    <item name="watermark_tag" type="id" />
+</resources>

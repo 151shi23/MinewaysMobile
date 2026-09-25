@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>3D 预览</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#15171b;color:#e8eaed;
+            font-family:-apple-system,"Noto Sans CJK SC",sans-serif;}
+  canvas{display:block;touch-action:none;}
+  .hud{position:fixed;left:10px;right:10px;font-size:12px;line-height:1.55;}
+  #info{top:10px;background:rgba(0,0,0,.5);padding:8px 10px;border-radius:8px;white-space:pre-wrap;}
+  #err{top:50%;transform:translateY(-50%);background:rgba(130,25,25,.93);padding:12px 14px;
+       border-radius:10px;display:none;white-space:pre-wrap;font-size:13px;z-index:9;}
+  #bar{bottom:12px;display:flex;flex-wrap:wrap;gap:6px;}
+  button{font-size:12px;padding:9px 11px;border-radius:8px;border:1px solid #4a4f57;
+         background:#272b31;color:#e8eaed;}
+  button.on{background:#3b6ea8;border-color:#5b8ec8;}
+  #prog{position:fixed;left:0;bottom:0;height:3px;width:0;background:#3b6ea8;z-index:10;}
+</style>
+</head>
+<body>
+<div id="info" class="hud">正在加载开源渲染库 three.js…</div>
+<div id="err" class="hud"></div>
+<div id="bar" class="hud">
+  <button id="bFit">适配视图</button>
+  <button id="bWire">线框</button>
+  <button id="bTex" class="on">贴图</button>
+  <button id="bBack">双面</button>
+  <button id="bSpin">自动旋转</button>
+  <button id="bTop">俯视</button>
+</div>
+<div id="prog"></div>
+
+<script src="lib/three.min.js"></script>
+<script src="lib/OBJLoader.js"></script>
+<script src="lib/MTLLoader.js"></script>
+<script src="lib/OrbitControls.js"></script>
+<script>
+"use strict";
+/*
+ * 离线 OBJ 预览器 —— 渲染部分使用开源库 three.js (MIT) + OBJLoader / MTLLoader / OrbitControls。
+ * 全部文件随 APK 内置（assets/objviewer/lib），不联网、不依赖 CDN。
+ *
+ * 设计要点（为了"绝不黑屏"）：
+ *   1) 任何一步失败都把原因写进红框（含请求到的 URL 与 HTTP 状态），屏幕上直接可读；
+ *   2) 库缺失、WebGL 不可用、OBJ/MTL 404、解析异常都有独立文案；
+ *   3) 模型加载中显示进度条与字节数，避免长等待看起来像卡死。
+ */
+(function () {
+  var info = document.getElementById('info');
+  var errBox = document.getElementById('err');
+  var prog = document.getElementById('prog');
+
+  function log(t) { info.textContent = t; }
+  function setProg(p) { prog.style.width = Math.max(0, Math.min(1, p)) * 100 + '%'; }
+  function showErr(title, detail) {
+    errBox.style.display = 'block';
+    errBox.textContent = title + (detail ? '\n\n' + detail : '');
+    log('加载失败 —— 详情见下方红框（可截图反馈）');
+  }
+  window.onerror = function (msg, src, line, col) {
+    showErr('脚本错误：' + msg, (src || '') + ':' + line + ':' + col);
+    return true;
+  };
+
+  if (typeof THREE === 'undefined') {
+    showErr('开源渲染库未加载（three.js 缺失）',
+        '请求 lib/three.min.js 失败。\n请确认安装包完整（重装一次），或把这句话反馈给开发者。');
+    return;
+  }
+  if (!THREE.OBJLoader || !THREE.MTLLoader || !THREE.OrbitControls) {
+    showErr('加载器缺失',
+        'OBJLoader=' + (!!THREE.OBJLoader) + ' MTLLoader=' + (!!THREE.MTLLoader)
+        + ' OrbitControls=' + (!!THREE.OrbitControls)
+        + '\n安装包里的 assets/objviewer/lib 不完整，请重装。');
+    return;
+  }
+
+  var query = new URLSearchParams(location.search);
+  var objName = query.get('obj') || 'mineways_export.obj';
+  var BASE = '/model/';
+  function encodePath(p) {
+    return p.split('/').map(encodeURIComponent).join('/');
+  }
+  var objUrl = BASE + encodePath(objName);
+
+  // ---------------- 场景 ----------------
+  var renderer, scene, camera, controls, model, meshes = [], mats = [];
+  var textureCount = 0, modelRadius = 1;
+  var texOn = true, wireOn = false;
+
+  function initGL() {
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+    } catch (e) {
+      showErr('本机 WebView 不支持 WebGL，无法显示 3D',
+          String(e && e.message ? e.message : e)
+          + '\n\n可在系统「开发者选项 → WebView 实现」更新 Android System WebView 后重试。');
+      return false;
+    }
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.setClearColor(0x15171b, 1);
+    document.body.appendChild(renderer.domElement);
+
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 1e7);
+    camera.position.set(1, 1, 1);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x555a60, 1.0));
+    var d1 = new THREE.DirectionalLight(0xffffff, 0.85);
+    d1.position.set(0.7, 1, 0.5);
+    scene.add(d1);
+    var d2 = new THREE.DirectionalLight(0xffffff, 0.35);
+    d2.position.set(-0.6, 0.6, -0.8);
+    scene.add(d2);
+
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = false;          // 按需渲染，关掉阻尼以免不动时不刷新
+    controls.autoRotateSpeed = 1.4;
+    controls.addEventListener('change', requestRender);
+    window.addEventListener('resize', onResize);
+    return true;
+  }
+
+  var pendingFrame = false;
+  function requestRender() {
+    if (pendingFrame || !renderer) return;
+    pendingFrame = true;
+    requestAnimationFrame(function () {
+      pendingFrame = false;
+      renderer.render(scene, camera);
+    });
+  }
+  function spinLoop() {
+    if (!controls || !controls.autoRotate) return;
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(spinLoop);
+  }
+  function onResize() {
+    if (!renderer) return;
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    requestRender();
+  }
+
+  // ---------------- 取文件（带进度） ----------------
+  function fetchText(url, onProgress) {
+    return fetch(url, { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status + '\n' + url);
+      var total = parseInt(r.headers.get('content-length') || '0', 10) || 0;
+      if (!r.body || !r.body.getReader) return r.text();
+      var reader = r.body.getReader(), chunks = [], got = 0;
+      var pump = function () {
+        return reader.read().then(function (res) {
+          if (res.done) {
+            var buf = new Uint8Array(got), off = 0;
+            for (var i = 0; i < chunks.length; i++) { buf.set(chunks[i], off); off += chunks[i].length; }
+            return new TextDecoder('utf-8').decode(buf);
+          }
+          chunks.push(res.value);
+          got += res.value.length;
+          if (onProgress) onProgress(total ? got / total : 0, got);
+          return pump();
+        });
+      };
+      return pump();
+    });
+  }
+
+  // ---------------- 装配模型 ----------------
+  function collectMaterials(obj) {
+    obj.traverse(function (n) {
+      if (!n.isMesh || !n.geometry) return;
+      if (!n.geometry.attributes.normal) n.geometry.computeVertexNormals();
+      meshes.push(n);
+      var m = n.material;
+      if (!m) return;
+      if (m.map && THREE.sRGBEncoding) m.map.encoding = THREE.sRGBEncoding;
+      m.side = THREE.DoubleSide;                 // 告示牌/花草是单面多边形，双面才不透明
+      m.needsUpdate = true;
+      mats.push(m);
+      if (m.map) textureCount++;
+    });
+  }
+
+  function flatMaterial() {
+    return new THREE.MeshLambertMaterial({ color: 0xc3cad3, side: THREE.DoubleSide });
+  }
+
+  function fitView() {
+    if (!model) return;
+    var box = new THREE.Box3().setFromObject(model);
+    if (box.isEmpty()) { showErr('模型是空的', 'OBJ 里没有可显示的几何体。'); return; }
+    var size = box.getSize(new THREE.Vector3());
+    var center = box.getCenter(new THREE.Vector3());
+    model.position.set(-center.x, -box.min.y, -center.z);      // 居中，底面贴地
+    modelRadius = Math.max(size.x, size.y, size.z) * 0.5 || 1;
+    camera.near = modelRadius / 1000;
+    camera.far = modelRadius * 100;
+    var dist = modelRadius / Math.sin(camera.fov * Math.PI / 360) * 1.15;
+    camera.position.set(dist * 0.62, dist * 0.52, dist * 0.72);
+    controls.target.set(0, size.y * 0.45, 0);
+    camera.updateProjectionMatrix();
+    controls.update();
+    requestRender();
+  }
+
+  function statsLine(objName, bytes) {
+    var verts = 0, tris = 0;
+    for (var i = 0; i < meshes.length; i++) {
+      var g = meshes[i].geometry;
+      var pos = g.attributes.position ? g.attributes.position.count : 0;
+      verts += pos;
+      tris += Math.round((g.index ? g.index.count : pos) / 3);
+    }
+    return objName + '  ' + (bytes / 1048576).toFixed(2) + ' MB\n'
+        + '顶点 ' + verts.toLocaleString() + ' · 三角面 ' + tris.toLocaleString()
+        + ' · 网格 ' + meshes.length + ' · 材质 ' + mats.length
+        + (textureCount ? '（含贴图 ' + textureCount + ' 张）' : '（无贴图，纯色/材质颜色）');
+  }
+
+  function loadModel() {
+    meshes = []; mats = []; textureCount = 0;
+    if (model) { scene.remove(model); model = null; }
+
+    log('正在读取模型…\n' + objUrl);
+    setProg(0.02);
+    fetchText(objUrl, function (p, got) {
+      setProg(0.02 + p * 0.78);
+      if (p > 0 && p < 1) log('正在读取模型… ' + Math.round(p * 100) + '%（'
+          + (got / 1048576).toFixed(1) + ' MB）');
+    }).then(function (objText) {
+      var bytes = objText.length;
+      setProg(0.82);
+      log('正在解析 OBJ…（' + (bytes / 1048576).toFixed(2) + ' MB）');
+      var t0 = Date.now();
+
+      // 尝试同目录 MTL（含贴图）；没有也不影响，继续用 OBJ 自带材质
+      var mtlName = objName.replace(/\.obj$/i, '.mtl');
+      var mtlUrl = BASE + encodePath(mtlName);
+      return fetchText(mtlUrl).then(function (mtlText) {
+        try {
+          // 统一斜杠并给含空格的贴图路径做转义（WebView 不会自动编码）
+          mtlText = mtlText.replace(/\\/g, '/').replace(
+              /^(map_\w+|bump|disp|decal)\s+(.+)$/gm,
+              function (all, key, val) { return key + ' ' + val.replace(/ /g, '%20'); });
+          var loader = new THREE.MTLLoader();
+          loader.setPath(BASE);
+          var mtl = loader.parse(mtlText);
+          if (mtl && mtl.preload) mtl.preload();
+          var objLoader = new THREE.OBJLoader();
+          objLoader.setMaterials(mtl || undefined);
+          return objLoader.parse(objText);
+        } catch (e) {
+          log('MTL 处理失败（' + e + '），改用 OBJ 自带材质继续…');
+          return new THREE.OBJLoader().parse(objText);
+        }
+      }).catch(function () {
+        log('未找到 ' + mtlName + '，按无材质继续…');
+        return new THREE.OBJLoader().parse(objText);
+      }).then(function (parsed) {
+        return { obj: parsed, bytes: bytes, ms: Date.now() - t0 };
+      });
+    }).then(function (res) {
+      model = res.obj;
+      collectMaterials(model);
+      if (!meshes.length) {
+        showErr('OBJ 里没有面', '文件读到了（' + (res.bytes / 1048576).toFixed(2)
+            + ' MB），但没有可显示的三角面。\n请确认导出时勾选了模型内容，或换一个 .obj。');
+        return;
+      }
+      for (var i = 0; i < meshes.length; i++) {
+        meshes[i].userData.__orig = meshes[i].material;
+      }
+      scene.add(model);
+      fitView();
+      setProg(1);
+      log(statsLine(objName, res.bytes) + '\n解析耗时 ' + res.ms + ' ms · 单指旋转 / 双指缩放');
+      requestRender();
+    }).catch(function (e) {
+      var msg = String(e && e.message ? e.message : e);
+      showErr('读取模型失败', msg + '\n\n常见原因：\n'
+          + '· 这个目录里没有 ' + objName + '（导出到别的文件夹了）\n'
+          + '· 导出还没完成 / 文件被移动\n'
+          + '建议改用独立界面底部的「选择 .obj 文件」直接挑文件。');
+    });
+  }
+
+  // ---------------- 控件 ----------------
+  function toggle(btn, on) { btn.className = on ? 'on' : ''; }
+
+  function bindUI() {
+    document.getElementById('bFit').onclick = function () { fitView(); };
+
+    document.getElementById('bWire').onclick = function () {
+      wireOn = !wireOn;
+      toggle(this, wireOn);
+      for (var i = 0; i < mats.length; i++) { mats[i].wireframe = wireOn; mats[i].needsUpdate = true; }
+      requestRender();
+    };
+
+    document.getElementById('bTex').onclick = function () {
+      texOn = !texOn;
+      toggle(this, texOn);
+      for (var i = 0; i < meshes.length; i++) {
+        var node = meshes[i];
+        if (!node.userData.__plain) node.userData.__plain = flatMaterial();
+        node.material = texOn ? node.userData.__orig : node.userData.__plain;
+        if (node.material) { node.material.wireframe = wireOn; node.material.needsUpdate = true; }
+      }
+      requestRender();
+    };
+
+    document.getElementById('bBack').onclick = function () {
+      var on = !this.classList.contains('on');
+      toggle(this, on);
+      for (var i = 0; i < mats.length; i++) {
+        mats[i].side = on ? THREE.FrontSide : THREE.DoubleSide;
+        mats[i].needsUpdate = true;
+      }
+      for (var j = 0; j < meshes.length; j++) {
+        var p = meshes[j].userData.__plain;
+        if (p) { p.side = on ? THREE.FrontSide : THREE.DoubleSide; p.needsUpdate = true; }
+      }
+      requestRender();
+    };
+
+    document.getElementById('bSpin').onclick = function () {
+      var on = !this.classList.contains('on');
+      toggle(this, on);
+      controls.autoRotate = on;
+      if (on) spinLoop(); else { controls.update(); requestRender(); }
+    };
+
+    document.getElementById('bTop').onclick = function () {
+      camera.position.set(0.001, modelRadius * 2.6, 0.001);
+      controls.target.set(0, 0, 0);
+      controls.update();
+      requestRender();
+    };
+  }
+
+  // ---------------- 启动 ----------------
+  if (initGL()) {
+    bindUI();
+    loadModel();
+    // Android 端可调用它拿到页面状态（便于反馈问题时一眼定位）
+    window.__viewerState = function () {
+      return info.textContent + (errBox.style.display === 'block' ? ('\n[ERR] ' + errBox.textContent) : '');
+    };
+  }
+})();
+</script>
+</body>
+</html>

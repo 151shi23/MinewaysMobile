@@ -1,0 +1,61 @@
+# ============================================================
+#  Mineways Mobile —— 版本库忽略规则
+#  开源版**不收录任何编译好的 APK / AAB**，也不收录签名密钥。
+#  Open-source version ships **no prebuilt APK/AAB** and no signing keys.
+# ============================================================
+
+# ---- 编译产物：APK / AAB / 中间产物（开源版一律不入库）----
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+build/
+*/build/
+**/build/
+.gradle/
+.cxx/
+obj/
+libs/
+outputs/
+release/
+debug/
+captures/
+*.hprof
+
+# ---- 签名与密钥：绝不入库（assembleRelease 请自备 keystore）----
+*.jks
+*.keystore
+*.p12
+*.pem
+*.der
+keystore.properties
+signing.properties
+产物/
+
+# ---- 本机/环境相关（路径、代理等）----
+local.properties
+android-env.sh
+*.log
+*.bak
+*.tmp
+
+# ---- 工具备份与临时文件 ----
+tools/_backup/
+*.orig
+*.rej
+
+# ---- IDE / 系统 ----
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.DS_Store
+Thumbs.db
+
+# ---- 导出、运行期产物 ----
+导出报错/
+预览缓存/
