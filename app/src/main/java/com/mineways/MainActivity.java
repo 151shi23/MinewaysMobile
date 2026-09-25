@@ -299,6 +299,53 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btn_preview_zip).setOnClickListener(v -> pickZip());
 
         findViewById(R.id.btn_join).setOnClickListener(v -> openJoinUrl());
+
+        // 首次启动引导窗（强窗口：10 秒倒计时后才能关闭）
+        showFirstRunIntro();
+    }
+
+    /** 首次启动引导窗：setCancelable(false) + 10 秒倒计时后按钮才可用；只显示一次。 */
+    private void showFirstRunIntro() {
+        try {
+            final android.content.SharedPreferences sp = exportOpts();
+            if (sp.getBoolean("first_run_intro_shown", false)) return;
+            View content = getLayoutInflater().inflate(R.layout.dialog_first_run, null);
+            final androidx.appcompat.app.AlertDialog d = new MaterialAlertDialogBuilder(this)
+                    .setTitle(getString(R.string.intro_title))
+                    .setView(content)
+                    .setCancelable(false)
+                    .setPositiveButton(getString(R.string.intro_close_wait, 10), null)
+                    .create();
+            d.show();
+            final android.widget.Button ok = d.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE);
+            ok.setEnabled(false);
+            new android.os.CountDownTimer(10000, 200) {
+                @Override
+                public void onTick(long msUntilFinished) {
+                    try {
+                        ok.setText(getString(R.string.intro_close_wait,
+                                (int) Math.ceil(msUntilFinished / 1000.0)));
+                    } catch (Throwable ignored) {
+                    }
+                }
+
+                @Override
+                public void onFinish() {
+                    try {
+                        ok.setText(getString(R.string.intro_close));
+                        ok.setEnabled(true);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }.start();
+            d.setOnDismissListener(dialog -> {
+                try {
+                    sp.edit().putBoolean("first_run_intro_shown", true).apply();
+                } catch (Throwable ignored) {
+                }
+            });
+        } catch (Throwable ignored) {
+        }
     }
 
     /** 选择 ZIP 压缩包预览：解压其中的 OBJ/MTL/贴图到缓存目录，再打开查看器。 */

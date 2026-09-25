@@ -151,6 +151,19 @@
     <string name="ai_save_failed">保存失败：%1$s</string>
     <string name="home_ai_title">AI 动画助手（独立界面）</string>
     <string name="home_ai_desc">描述动画逻辑，AI 生成 Blockbench 动画 JSON / Snowstorm 粒子 JSON / Molang 表达式；自配 API Key，仅存本机</string>
+
+    <!-- 首次启动引导窗 -->
+    <string name="intro_title">欢迎使用 Mineways Mobile</string>
+    <string name="intro_s1">这个应用是什么</string>
+    <string name="intro_app_body">把 Minecraft（Java 版 / 基岩版 / 网易版）存档里的建筑，全程离线导出成带贴图与材质的 OBJ 模型：框选坐标 → 导出 → 内置 3D 预览 → 打包 ZIP 到「下载」。另含基岩版转 Java 版转换器、离线 Blockbench、AI 动画助手（自配 API）等独立模块。</string>
+    <string name="intro_s2">开源项目</string>
+    <string name="intro_project_body">本项目以 GPL-3.0 开源：github.com/151shi23/MinewaysMobile\n仓库只含源码（不含编译好的 APK）；构建方法、导出选项的三态用法与常见问题都写在 README 里。</string>
+    <string name="intro_s3">开发与贡献人员</string>
+    <string name="intro_team_body">· ZERO寂灵 —— 策划与移植主导，并参与测试、提供可靠日志\n· 蚩尤 —— 测试，找出并推动修复多个重大 bug（导出选项失效、3D 预览、导出 0 方块、方块漏导、维度错误、选择器三态等）\n两位的测试同等重要：一人负责问题面、一人负责复现细节，缺一不可。</string>
+    <string name="intro_s4">鸣谢原作</string>
+    <string name="intro_thanks_body">本应用的核心引擎来自开源项目 Mineways（Eric Haines / erich666），在此向原作者致敬。\n同时感谢：Chunker（hivemc）、three.js（MIT）、Blockbench（MIT）、lodepng（zlib）等开源项目，完整清单见仓库 THIRD_PARTY.md。\n本项目与 Mojang / Microsoft / 网易无隶属关系；请仅对你合法拥有的存档使用本工具。</string>
+    <string name="intro_close_wait">请阅读（%1$d s）</string>
+    <string name="intro_close">开始使用</string>
     <string name="result_hint">导出结果将显示在这里</string>
     <string name="progress_prefix">进度</string>
 

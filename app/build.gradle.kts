@@ -10,8 +10,8 @@ android {
         applicationId = "com.mineways"
         minSdk = 26
         targetSdk = 34
-        versionCode = 37
-        versionName = "3.7"
+        versionCode = 38
+        versionName = "3.8"
         // 显式锁定已安装的 NDK 版本（r26.3），避免 AGP 自动下载其它 NDK
         ndkVersion = "26.3.11579264"
         ndk {
