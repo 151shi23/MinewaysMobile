@@ -12,6 +12,7 @@
 #include "nbt.h"       // BlockEntity / NBT_* 返回码
 #include "region.h"    // regionGetBlocks —— 核心自己的读档入口
 #include "blockInfo.h" // gBlockDefinitions[] —— 内置ID → 方块名（仅用于报告）
+#include "CullingSchemes.h" // isBlockCulled —— 让"被过滤"判定与导出完全一致
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -689,18 +690,39 @@ std::string probeCoreRead(const std::wstring& worldDir, int mcVersion, int minHe
                 used[best] = true;
                 const char* nm = "?";
                 if (best < NUM_BLOCKS_DEFINED && gBlockDefinitions[best].name) nm = gBlockDefinitions[best].name;
-                // 标注这一种方块在当前设置下会不会被过滤（与核心判定同口径：
-                // flags 命中保存过滤位 且 alpha>0 才会留下；剔除方案只管 barrier/structure_void 等技术块）
-                bool kept = true;
+                // 逐条核对该方块会不会被留下：与核心导出时**完全同一套**判定
+                //   (flags & saveFilterFlags) && alpha > 0 && !isBlockCulled(type, dataVal)
+                // 报告里给出具体数值，出错时一眼看出是哪个条件挡的。
+                unsigned int fl = 0;
+                float al = 0.0f;
+                bool keptByFilter = true, keptByAlpha = true, culled = false;
                 if (best < NUM_BLOCKS_DEFINED) {
+                    fl = (unsigned int)gBlockDefinitions[best].flags;
+                    al = gBlockDefinitions[best].alpha;
                     const unsigned int CLASS_MASK = BLF_WHOLE | BLF_ALMOST_WHOLE | BLF_STAIRS | BLF_HALF |
                             BLF_MIDDLER | BLF_BILLBOARD | BLF_PANE | BLF_FLATTEN | BLF_FLATTEN_SMALL |
                             BLF_SMALL_MIDDLER | BLF_SMALL_BILLBOARD;
-                    kept = ((gBlockDefinitions[best].flags & CLASS_MASK) != 0)
-                           && (gBlockDefinitions[best].alpha > 0.0f);
+                    keptByFilter = (fl & CLASS_MASK) != 0;
+                    keptByAlpha = al > 0.0f;
+                    culled = isBlockCulled(best, 0);
+                }
+                char hexbuf[32];
+                snprintf(hexbuf, sizeof(hexbuf), "0x%X", fl);
+                char alphaBuf[32];
+                snprintf(alphaBuf, sizeof(alphaBuf), "%.3f", al);
+                std::string verdict;
+                if (keptByFilter && keptByAlpha && !culled) {
+                    verdict = "[会导出]";
+                } else {
+                    verdict = "[被过滤：";
+                    if (!keptByFilter) verdict += "类别位不在保存过滤内 ";
+                    if (!keptByAlpha) verdict += "alpha<=0 ";
+                    if (culled) verdict += "被剔除方案隐藏 ";
+                    verdict += "]";
                 }
                 if (!list.empty()) list += " ；";
-                list += std::string(nm) + " ×" + fmtInt(bestCount) + (kept ? "[会导出]" : "[被过滤]");
+                list += std::string(nm) + " ×" + fmtInt(bestCount) + verdict
+                        + "(flags=" + hexbuf + " alpha=" + alphaBuf + ")";
             }
             out += list.empty() ? std::string("（无）\n") : (list + "\n");
         }

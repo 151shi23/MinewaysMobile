@@ -236,6 +236,19 @@ Java_com_mineways_MainActivity_exportWorld(JNIEnv* env, jobject,
 
     // 再用核心自己的读档函数试读**选区内**的区块：把"导出 0 方块"拆成三层
     //   —— 核心解析失败 / 选区内确实没有方块（多半 Y 填错）/ 渲染筛选层问题
+    // 先应用一次剔除方案：让"导出前试读"里的"[被过滤]"判定与真正的导出**完全同一套状态**
+    // （剔除只影响 barrier/structure_void/structure_block 等技术块；这里幂等，不影响后面的正式装配）
+    if (cullMode == 0) {
+        unsigned char showAllEarly[NUM_CULL_ENTRIES];
+        memset(showAllEarly, 0, sizeof(showAllEarly));
+        applyCullingScheme(showAllEarly);
+    } else if (cullMode == 2) {
+        applyCullingScheme(NULL);
+        seedExtraCulled();
+    } else {
+        applyCullingScheme(NULL);
+    }
+
     std::string coreProbe = ExportDiag::probeCoreRead(
             dimensionDir(std::wstring(worldDir), dim, wg.newFormat), mcVersion,
             mapMinHeight, mapMaxHeight,
@@ -498,6 +511,17 @@ Java_com_mineways_MainActivity_exportWorld(JNIEnv* env, jobject,
                 + ", Z " + I((long long)scan.minChunkZ * 16) + ".." + I((long long)scan.maxChunkZ * 16 + 15) + "\n";
     }
     report += "[选维度] " + dimensionName(dim) + "（导出与试读都按这个维度读 region）\n";
+    {
+        int matMode = optInt(opts, "mat", 4);
+        char fx[32];
+        snprintf(fx, sizeof(fx), "0x%X", (unsigned int)opt.saveFilterFlags);
+        report += std::string("[导出装配] 材质模式 mat=") + I(matMode) + "（0=不导出材质）"
+                + "  saveFilterFlags=" + fx
+                + "  3D打印结构位=" + I((opt.exportFlags & EXPT_3DPRINT) ? 1 : 0)
+                + "  面剔除隐藏 " + I(culledTypes) + " 种\n";
+        report += "    （核心放行一个方块要同时满足：类别位命中 saveFilterFlags + alpha>0 + 未被剔除；"
+                  "下面 [选区实测] 里每种方块都标了具体数值与原因）\n";
+    }
     report += "[选区命中] 覆盖 " + I(scan.coveredChunks) + " 个区块坐标，其中磁盘上存在 "
             + I(scan.presentChunks) + " 个" + (scan.selectionCapped ? "（选区过大，统计已截断）" : "") + "\n";
     if (dim != 0) {
