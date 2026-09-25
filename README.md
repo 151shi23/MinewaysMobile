@@ -61,7 +61,7 @@
 | **3D 打印尺寸** | 按高度(cm) / 按壁厚最小化 / 每区块(mm) / 目标成本、模型单位、物理材料 |
 | **面剔除** | 全显示 / 标准（隐藏 barrier、structure_void）/ 强剔除（再加 structure_block）|
 | **3D 预览（独立界面）** | 开源 **three.js** 离线渲染 OBJ，自动读同目录 MTL 与贴图；单指旋转、双指缩放，可切线框/贴图/双面/自动旋转；也能直接挑任意 `.obj` 或先看 ZIP |
-| **诊断报告** | 每次导出都生成可粘贴的报告：世界体检、选区命中、`[选区实测]`（读到的方块类型 / Y 分层 / 俯视高度图）、`[核心回执]`（核心自己记录的生效选项）、`[导出内容]`（实际写进 OBJ 的材质清单，含 glass 探测）|
+| **诊断报告** | 每次导出都生成可粘贴的报告：世界体检、选区命中、`[选区实测]`（读到的方块类型 / Y 分层 / 俯视高度图）、`[核心回执]`（核心自己记录的生效选项）、`[导出内容]`（实际写进 OBJ 的材质清单，含 glass 探测）、`[对等性自检]`（顶点包围盒 vs 核心声明尺寸：缩放比 / 是否越界 / 坐标轴方向）|
 | **内置工具** | 网页版 Blockbench（离线）、小游戏《寂零快跑》、世界信息与工具页 |
 
 ### 导出选项的三态：多选 / 单选 / 不选
@@ -158,6 +158,12 @@ tools/                            # 构建 / 审计 / 离线化脚本
 
 **导出结果在哪里？** 勾选「导出后打包 ZIP 到「下载/MinewaysMobile」」后，ZIP 出现在公共「下载」目录（Android 10+ 走 MediaStore，无需权限）；Android 8/9 首次会申请存储权限，未授权则退回应用私有目录。
 
+**怎么确认导出的 OBJ 与存档"完全对等"（无任何不对等）？** 看报告里的 `[对等性自检]`，它用**实测**给出三个判定：
+① **缩放比** 应为 `1.000`（即 1 单位 = 1 方块，未被 3D 打印尺寸污染）；
+② 模型**是否超出选区**（应为"未超出"）；
+③ **坐标轴方向**（Mineways 绝对坐标 OBJ 的 X 轴是镜像的、Y/Z 与世界坐标一致 —— 这是与桌面版相同的既定约定，不是错误）。
+再结合 `[导出内容]`（实际写进模型的材质清单）与 `[选区实测]`（读到的方块类型 / Y 分层），即可确认"读进来 → 写出去"全链路一致。
+
 **为什么有的选项勾了看起来没变化？** 选项效果多发生在 OBJ 内部结构或几何细节上（分组、焊接、掏空…）。报告里的 `[核心回执]` 是**核心自己写的生效状态**，一眼可核对是否真的生效。
 
 ### 鸣谢
@@ -191,7 +197,7 @@ tools/                            # 构建 / 审计 / 离线化脚本
 | **3D-print sizing** | By height (cm) / minimize by wall thickness / mm per block / target cost, units, physical material |
 | **Culling schemes** | Show all / Standard (hide barrier & structure_void) / Aggressive (also structure_block) |
 | **3D preview (dedicated screen)** | Open-source **three.js** renders the OBJ offline and auto-loads the sibling MTL + textures; one-finger orbit, pinch zoom, wireframe / texture / double-side / autorotate toggles; you can also pick any `.obj` directly or preview a ZIP |
-| **Diagnostics report** | Every export yields a copy-pasteable report: world health check, selection hit stats, `[选区实测]` (block types read / Y bands / top-down height map), `[核心回执]` (the core's own record of effective options), `[导出内容]` (materials actually written to the OBJ, incl. a glass probe) |
+| **Diagnostics report** | Every export yields a copy-pasteable report: world health check, selection hit stats, `[选区实测]` (block types read / Y bands / top-down height map), `[核心回执]` (the core's own record of effective options), `[导出内容]` (materials actually written to the OBJ, incl. a glass probe), `[对等性自检]` (vertex bounding box vs the core's declared size: scale ratio / out-of-selection / axis orientation) |
 | **Built-ins** | Offline web Blockbench, the mini-game 《寂零快跑》, world-info/tools page |
 
 ### Export options: multi-select / single-select / none
@@ -269,6 +275,12 @@ tools/                              # Build / audit / offline-asset scripts
 - Absent → combine with `[选区实测]` (each block type is tagged `[会导出]` / `[被过滤]`) to tell filtering apart from “not in the selection at all”.
 
 **Where do exports go?** With “package a ZIP into Downloads/MinewaysMobile” enabled, the ZIP lands in the public Downloads folder (Android 10+ uses MediaStore, no permission needed). On Android 8/9 the app asks for storage permission on first use; if denied, results fall back to the app-private folder.
+
+**How do I confirm the exported OBJ matches the save exactly (no discrepancy)?** Read `[对等性自检]` in the report — it *measures* three things:
+① the **scale ratio**, which must be `1.000` (1 unit = 1 block, unaffected by 3D-print sizing);
+② whether the model **stays inside the selection** (it should);
+③ the **axis orientation** (an absolute-coordinate Mineways OBJ mirrors the X axis while Y/Z match world coordinates — that is the established desktop-version convention, not a bug).
+Together with `[导出内容]` (what was actually written) and `[选区实测]` (what was read), this verifies the whole "read → write" chain.
 
 **Why do some options look like they do nothing?** Most options affect OBJ internals or geometry details (grouping, welding, hollowing…). The `[核心回执]` section of the report is the **core's own record** of what actually took effect — check it there.
 

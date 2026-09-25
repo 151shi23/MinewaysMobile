@@ -575,6 +575,14 @@ Java_com_mineways_MainActivity_exportWorld(JNIEnv* env, jobject,
             report += ExportDiag::summarizeObjContent(ExportDiag::toUtf8(objPath), 40);
             report += "    （若某个方块不在此列表：它被过滤/剔除，或压根不在选区内；在此列表却看不到，"
                       "则是查看器的材质透明度/显示设置问题）\n";
+
+            // ---- 对等性自检：尺寸 / 缩放 / 方向（用导出的 OBJ 实测，不依赖对核心的假设）----
+            report += "[对等性自检] 顶点包围盒 vs 核心声明尺寸（验证缩放 / 越界 / 方向）\n";
+            report += ExportDiag::verifyObjGeometry(ExportDiag::toUtf8(objPath),
+                    minx, y0, minz, maxx, y1, maxz,
+                    optInt(opts, "rotate", 0),
+                    optInt(opts, "zup", 0) != 0,
+                    optInt(opts, "center", 0) != 0);
         }
     }
 

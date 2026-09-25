@@ -1009,4 +1009,152 @@ std::string summarizeObjContent(const std::string& objPathUtf8, int maxNames) {
     return out;
 }
 
+std::string verifyObjGeometry(const std::string& objPathUtf8,
+                              int selMinX, int selMinY, int selMinZ,
+                              int selMaxX, int selMaxY, int selMaxZ,
+                              int rotateDeg, bool zUp, bool centered) {
+    std::string out;
+    FILE* f = fopen(objPathUtf8.c_str(), "rb");
+    if (f == NULL) return std::string("    （读不到 OBJ 文件，跳过自检）\n");
+
+    long long declaredX = -1, declaredY = -1, declaredZ = -1;
+    long long vertsDeclared = -1, facesDeclared = -1, blocksDeclared = -1;
+    double declaredScale = -1.0;
+
+    double mnx = 0, mny = 0, mnz = 0, mxx = 0, mxy = 0, mxz = 0;
+    bool anyV = false;
+    long long vCount = 0, bytes = 0;
+    bool truncated = false;
+    const long long CAP = 200LL * 1024 * 1024;
+
+    char line[1024];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        bytes += (long long)strlen(line);
+        if (bytes > CAP) { truncated = true; break; }
+
+        if (line[0] == '#') {
+            long long a = 0, b = 0, c = 0;
+            if (declaredX < 0 && sscanf(line, "# block dimensions: X=%lld by Y=%lld by Z=%lld", &a, &b, &c) == 3) {
+                declaredX = a; declaredY = b; declaredZ = c;
+            } else if (vertsDeclared < 0 && sscanf(line, "# %lld vertices, %lld faces", &a, &b) == 2) {
+                vertsDeclared = a; facesDeclared = b;
+                const char* p = strstr(line, " blocks");
+                if (p != NULL) {
+                    const char* q = p;
+                    while (q > line && (*(q - 1) >= '0' && *(q - 1) <= '9')) q--;
+                    if (q < p) blocksDeclared = atoll(q);
+                }
+            } else if (declaredScale < 0.0) {
+                double sc = 0.0;
+                if (sscanf(line, "# block_scale: %lf", &sc) == 1) declaredScale = sc;
+            }
+            continue;
+        }
+        if (line[0] == 'v' && line[1] == ' ') {
+            double x = 0, y = 0, z = 0;
+            if (sscanf(line + 2, "%lf %lf %lf", &x, &y, &z) == 3) {
+                if (!anyV) { mnx = mxx = x; mny = mxy = y; mnz = mxz = z; anyV = true; }
+                else {
+                    if (x < mnx) mnx = x;
+                    if (x > mxx) mxx = x;
+                    if (y < mny) mny = y;
+                    if (y > mxy) mxy = y;
+                    if (z < mnz) mnz = z;
+                    if (z > mxz) mxz = z;
+                }
+                vCount++;
+            }
+        }
+    }
+    fclose(f);
+
+    if (!anyV) {
+        out += "    （OBJ 里没有任何 v 行：模型为空，无法自检）\n";
+        return out;
+    }
+
+    char nb[64];
+    const double sx = mxx - mnx, sy = mxy - mny, sz = mxz - mnz;
+    snprintf(nb, sizeof(nb), "%.3f × %.3f × %.3f", sx, sy, sz);
+    out += std::string("    OBJ 实测：") + fmtInt(vCount) + " 个 v 行，包围盒 " + nb + "（单位）\n";
+
+    if (declaredX > 0) {
+        snprintf(nb, sizeof(nb), "X=%lld by Y=%lld by Z=%lld", declaredX, declaredY, declaredZ);
+        out += std::string("    核心声明（OBJ 注释头）：block dimensions ") + nb + " 方块";
+        if (blocksDeclared > 0) out += "，共 " + fmtInt(blocksDeclared) + " 个方块";
+        if (facesDeclared > 0) out += "，" + fmtInt(facesDeclared) + " 个面";
+        if (declaredScale > 0.0) {
+            snprintf(nb, sizeof(nb), "%.6g", declaredScale);
+            out += std::string("；block_scale=") + nb;
+        }
+        out += "\n";
+    }
+
+    // ① 尺寸 / 缩放：逐轴比较（启用旋转或 Z-up 时只比"排序后的三边"）
+    const double ex[3] = {(double)declaredX, (double)declaredY, (double)declaredZ};
+    const double gx[3] = {sx, sy, sz};
+    const bool sizeKnown = declaredX > 0 && declaredY > 0 && declaredZ > 0;
+    if (sizeKnown) {
+        if (rotateDeg != 0 || zUp) {
+            double a[3] = {gx[0], gx[1], gx[2]}, b[3] = {ex[0], ex[1], ex[2]};
+            std::sort(a, a + 3);
+            std::sort(b, b + 3);
+            double r0 = b[0] > 0 ? a[0] / b[0] : 0, r1 = b[1] > 0 ? a[1] / b[1] : 0, r2 = b[2] > 0 ? a[2] / b[2] : 0;
+            snprintf(nb, sizeof(nb), "%.3f / %.3f / %.3f", r0, r1, r2);
+            const bool ok = (r0 > 0.995 && r0 < 1.005) && (r1 > 0.995 && r1 < 1.005) && (r2 > 0.995 && r2 < 1.005);
+            out += std::string("    → 缩放比（已按旋转/Z-up 换轴比较）：") + nb
+                 + (ok ? "  ✓ 1 单位 = 1 方块，未被缩放\n" : "  ✗ 与声明尺寸不符，模型可能被缩放！\n");
+        } else {
+            const double r0 = ex[0] > 0 ? sx / ex[0] : 0;
+            const double r1 = ex[1] > 0 ? sy / ex[1] : 0;
+            const double r2 = ex[2] > 0 ? sz / ex[2] : 0;
+            snprintf(nb, sizeof(nb), "%.3f / %.3f / %.3f", r0, r1, r2);
+            const bool ok = (r0 > 0.995 && r0 < 1.005) && (r1 > 0.995 && r1 < 1.005) && (r2 > 0.995 && r2 < 1.005);
+            out += std::string("    → 缩放比（X/Y/Z）：") + nb
+                 + (ok ? "  ✓ 1 单位 = 1 方块，未被缩放\n" : "  ✗ 与声明尺寸不符，模型可能被缩放！\n");
+        }
+    }
+
+    // ② 是否超出选区
+    const double selSpanX = selMaxX - selMinX + 1;
+    const double selSpanY = selMaxY - selMinY + 1;
+    const double selSpanZ = selMaxZ - selMinZ + 1;
+    if (sizeKnown) {
+        double got[3] = {gx[0], gx[1], gx[2]}, want[3] = {selSpanX, selSpanY, selSpanZ};
+        std::sort(got, got + 3);
+        std::sort(want, want + 3);
+        const bool within = got[0] <= want[0] + 0.001 && got[1] <= want[1] + 0.001 && got[2] <= want[2] + 0.001;
+        snprintf(nb, sizeof(nb), "%.0f × %.0f × %.0f", selSpanX, selSpanY, selSpanZ);
+        out += std::string("    → 选区范围：") + nb + " 方块；模型"
+             + (within ? "未超出选区 ✓\n" : "大于选区 ✗（可能坐标/范围被改写）\n");
+    }
+
+    // ③ 方向：绝对值 OBJ 的 X 轴在 Mineways 里是镜像的（与游戏内左右相反）。
+    // 只在未启用居中/旋转/Z-up 时判定，避免误报。
+    if (sizeKnown && rotateDeg == 0 && !zUp && !centered) {
+        const double tol = 1.5;
+        const bool xSame = fabs(mnx - selMinX) <= tol;
+        const bool xMirror = fabs(mxx - (-(double)selMinX)) <= tol || fabs(mnx - (-(double)(selMaxX + 1))) <= tol;
+        const bool sameWithin = fabs(mnx - selMinX) <= tol && fabs(mxx - (selMaxX + 1)) <= tol;
+        const bool mirrorWithin = fabs(mnx - (-(double)(selMaxX + 1))) <= tol && fabs(mxx - (-(double)selMinX)) <= tol;
+        snprintf(nb, sizeof(nb), "X %.1f..%.1f  Y %.1f..%.1f  Z %.1f..%.1f", mnx, mxx, mny, mxy, mnz, mxz);
+        out += std::string("    → 坐标范围：") + nb + "\n";
+        if (mirrorWithin) {
+            out += "    → 方向判定：X 轴镜像（Mineways 绝对坐标 OBJ 的一贯约定，等于站在北面看你世界的左右关系）；"
+                   "Y/Z 与世界坐标一致 ✓\n";
+        } else if (sameWithin) {
+            out += "    → 方向判定：X/Y/Z 与世界坐标同向 ✓\n";
+        } else {
+            out += std::string("    → 方向判定：起点与选区不吻合（X 同向？")
+                 + (xSame ? "是" : "否") + "，X 镜像？" + (xMirror ? "是" : "否")
+                 + "）——若你改过选区或用了「居中/旋转/Z-up」，此项可忽略\n";
+        }
+    } else if (rotateDeg != 0 || zUp || centered) {
+        out += "    → 方向判定：已启用居中 / 旋转 / Z-up，方向自检跳过（只校验尺寸与缩放）\n";
+    }
+
+    if (truncated) out += "    （文件超过 200MB，以上为前 200MB 的统计）\n";
+    return out;
+}
+
 }  // namespace ExportDiag

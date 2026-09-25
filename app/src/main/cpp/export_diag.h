@@ -113,4 +113,14 @@ std::string readObjReceipt(const std::string& objPathUtf8, int maxLines);
 //   名字在 → 已导出（看不到就是显示/材质/透明度一侧）；名字不在 → 被过滤/剔除/不在选区。
 std::string summarizeObjContent(const std::string& objPathUtf8, int maxNames);
 
+// OBJ 对等性自检：扫描 OBJ 里所有 v 行的包围盒，与 OBJ 注释头中**核心自己声明**的
+// `# block dimensions: X=.. by Y=.. by Z=.. blocks` / 顶点面数 / `# block_scale:` 对照，
+// 从而验证：① 1 单位 = 1 方块（没有被 3D 打印缩放污染）；② 模型没有超出选区；
+// ③ 坐标轴方向是否符合 Mineways 约定（X 镜像），或已启用居中/旋转/Z-up 时说明跳过方向判定。
+// 全部为经验测量，不依赖对核心代码的假设。
+std::string verifyObjGeometry(const std::string& objPathUtf8,
+                              int selMinX, int selMinY, int selMinZ,
+                              int selMaxX, int selMaxY, int selMaxZ,
+                              int rotateDeg, bool zUp, bool centered);
+
 }  // namespace ExportDiag
