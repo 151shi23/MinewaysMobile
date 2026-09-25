@@ -73,8 +73,11 @@
 | Android SDK | 平台 **34**、Build-Tools **34.x** |
 | NDK | **26.3.11579264**（`ndkVersion`）|
 | CMake | 随 SDK 安装即可（`app/src/main/cpp/CMakeLists.txt`）|
-| Gradle | 使用仓库自带 wrapper |
+| Gradle | 使用仓库自带 wrapper（8.14.5）|
 | 设备 | Android **8.0+（API 26）**；ABI：`arm64-v8a`、`armeabi-v7a`、`x86_64` |
+
+> **Windows 提示**：Android Gradle Plugin 拒绝**含非 ASCII 字符的工程路径**（中文目录会直接构建失败）。
+> 克隆到纯英文路径（如 `C:\dev\MinewaysMobile`）再构建；仓库自带 `tools/build_release.ps1` 也会先把源码复制到 `C:\mmbuild` 这类纯 ASCII 目录再编译。
 
 > 原生库已按 **16 KB 页**对齐（`arm64-v8a` / `x86_64`），可在 Android 15+ 的 16 KB 页设备上正常加载。
 
@@ -187,6 +190,11 @@ The **Export options** panel (button on the export page, or long-press *Start ex
 | NDK | **26.3.11579264** |
 | CMake | installed with the SDK (`app/src/main/cpp/CMakeLists.txt`) |
 | Device | Android **8.0+ (API 26)**; ABIs `arm64-v8a`, `armeabi-v7a`, `x86_64` |
+
+> **Windows note:** the Android Gradle Plugin refuses project paths containing **non-ASCII characters**
+> (a CJK directory name fails the build outright). Clone into a plain-ASCII path such as
+> `C:\dev\MinewaysMobile`. The bundled `tools/build_release.ps1` also copies sources into an ASCII
+> sandbox (`C:\mmbuild`) before compiling.
 
 > Native libraries are **16 KB-page aligned** for `arm64-v8a` / `x86_64`, so they load on Android 15+ 16 KB-page devices.
 
