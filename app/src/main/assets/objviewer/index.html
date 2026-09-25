@@ -77,6 +77,30 @@
     return;
   }
 
+  // ---------------- 贴图加载审计 ----------------
+  // three.js 的一个坑：贴图"还没加载完"或"加载失败"时，材质都会被渲染成黑色 ——
+  // 看起来就像"贴图是黑的"。这里给 TextureLoader 挂上成功/失败计数：
+  //   · 加载中：信息栏显示"贴图加载中… 剩余 N"（而不是黑着等人猜）；
+  //   · 失败：把对应材质换成洋红占位色，并列出失败 URL（404 / 目录名不符 / PNG 损坏一眼可辨）。
+  var texStats = { total: 0, ok: 0, fail: 0, failedUrls: [], settled: false };
+  var origTexLoad = THREE.TextureLoader.prototype.load;
+  THREE.TextureLoader.prototype.load = function (url, onLoad, onProgress, onError) {
+      texStats.total++;
+      return origTexLoad.call(this, url,
+          function (tex) {
+              texStats.ok++;
+              if (texStats.total > 0 && texStats.ok + texStats.fail >= texStats.total) texStats.settled = true;
+              if (onLoad) onLoad(tex);
+          },
+          onProgress,
+          function (err) {
+              texStats.fail++;
+              if (texStats.failedUrls.length < 6) texStats.failedUrls.push(String(url));
+              if (texStats.total > 0 && texStats.ok + texStats.fail >= texStats.total) texStats.settled = true;
+              if (onError) onError(err);
+          });
+  };
+
   var query = new URLSearchParams(location.search);
   var objName = query.get('obj') || 'mineways_export.obj';
   var BASE = '/model/';
@@ -181,6 +205,7 @@
       var m = n.material;
       if (!m) return;
       if (m.map && THREE.sRGBEncoding) m.map.encoding = THREE.sRGBEncoding;
+      if (m.aoMap) { m.aoMap = null; m.needsUpdate = true; }   // OBJ 无 uv2，aoMap 只会渲染成黑
       m.side = THREE.DoubleSide;                 // 告示牌/花草是单面多边形，双面才不透明
       m.needsUpdate = true;
       mats.push(m);
@@ -244,22 +269,64 @@
       var mtlName = objName.replace(/\.obj$/i, '.mtl');
       var mtlUrl = BASE + encodePath(mtlName);
       return fetchText(mtlUrl).then(function (mtlText) {
-        try {
-          // 统一斜杠并给含空格的贴图路径做转义（WebView 不会自动编码）
-          mtlText = mtlText.replace(/\\/g, '/').replace(
-              /^(map_\w+|bump|disp|decal)\s+(.+)$/gm,
-              function (all, key, val) { return key + ' ' + val.replace(/ /g, '%20'); });
-          var loader = new THREE.MTLLoader();
-          loader.setPath(BASE);
-          var mtl = loader.parse(mtlText);
-          if (mtl && mtl.preload) mtl.preload();
-          var objLoader = new THREE.OBJLoader();
-          objLoader.setMaterials(mtl || undefined);
-          return objLoader.parse(objText);
-        } catch (e) {
-          log('MTL 处理失败（' + e + '），改用 OBJ 自带材质继续…');
-          return new THREE.OBJLoader().parse(objText);
-        }
+        // 统一斜杠
+        mtlText = mtlText.replace(/\\/g, '/');
+
+        // ★ 修复一（黑贴图主因）：删掉 map_Ka 行。
+        //   Mineways 的 MTL 给每个材质都写 map_Ka；three.js 的 MTLLoader 把它映射为 aoMap，
+        //   而 aoMap 需要 uv2 —— OBJ 网格没有 uv2，结果整个模型渲染成黑色。
+        //   桌面版 Blender 会忽略 map_Ka，所以只有我们的预览器中招。环境光贴图对预览没有可见贡献。
+        mtlText = mtlText.replace(/^\s*map_Ka\s+.*$/gim, '');
+
+        // ★ 修复二（路径容错）：不猜 MTL 的贴图路径写法 —— 用第一个贴图值探测哪个 URL 真的能取到
+        //   （原样 / 仅文件名 / tex+文件名），命中后把所有 map_* 统一重写成可用 URL。
+        //   MTL 写 tex/x.png、x.png、绝对路径、带空格或中文……都能落地。
+        var finishMtl = function (text) {
+            try {
+              var loader = new THREE.MTLLoader();
+              loader.setPath(BASE);
+              var mtl = loader.parse(text);
+              if (mtl && mtl.preload) mtl.preload();
+              var objLoader = new THREE.OBJLoader();
+              objLoader.setMaterials(mtl || undefined);
+              return objLoader.parse(objText);
+            } catch (e) {
+              log('MTL 处理失败（' + e + '），改用 OBJ 自带材质继续…');
+              return new THREE.OBJLoader().parse(objText);
+            }
+        };
+        var vals = [];
+        mtlText.replace(/^\s*(?:map_\w+|bump|norm|disp|decal)\s+(.+)$/gm, function (all, v) {
+            v = v.trim();
+            if (v && vals.indexOf(v) < 0 && vals.length < 4) vals.push(v);
+            return all;
+        });
+        if (vals.length === 0) return finishMtl(mtlText);
+        var first = vals[0];
+        var name = first.split('/').pop();
+        var cands = [
+            BASE + first.split('/').map(encodeURIComponent).join('/'),
+            BASE + encodeURIComponent(name),
+            BASE + 'tex/' + encodeURIComponent(name)
+        ];
+        var ci = 0;
+        var probe = function () {
+            if (ci >= cands.length) return finishMtl(mtlText);
+            fetch(cands[ci], { cache: 'no-store' }).then(function (r) {
+                if (!r.ok) { ci++; probe(); return; }
+                var strat = ci;   // 0=原样 1=仅文件名 2=tex/文件名
+                if (strat !== 0) {
+                    mtlText = mtlText.replace(/^(\s*(?:map_\w+|bump|norm|disp|decal)\s+)(.+)$/gm,
+                        function (all, pre, v) {
+                            var n = v.trim().split('/').pop();
+                            return pre + (strat === 1 ? BASE + encodeURIComponent(n)
+                                                      : BASE + 'tex/' + encodeURIComponent(n));
+                        });
+                }
+                return finishMtl(mtlText);
+            }).catch(function () { ci++; probe(); });
+        };
+        return probe();
       }).catch(function () {
         log('未找到 ' + mtlName + '，按无材质继续…');
         return new THREE.OBJLoader().parse(objText);
@@ -280,8 +347,60 @@
       scene.add(model);
       fitView();
       setProg(1);
-      log(statsLine(objName, res.bytes) + '\n解析耗时 ' + res.ms + ' ms · 单指旋转 / 双指缩放');
-      requestRender();
+
+      // 贴图就绪审计：加载中显示进度；全部结束后，仍没有图像的贴图换成洋红占位（而不是黑），
+      // 并列出失败 URL —— "贴图是黑的"从此可解释：要么还在加载，要么贴图文件没到位。
+      var audit = function () {
+          var pending = 0, failed = 0;
+          for (var i = 0; i < mats.length; i++) {
+              var m = mats[i];
+              if (m && m.map && m.map.image === undefined) {
+                  if (texStats.settled) failed++; else pending++;
+              }
+          }
+          var base = statsLine(objName, res.bytes) + '\n解析耗时 ' + res.ms + ' ms · 单指旋转 / 双指缩放';
+          if (pending === 0 && failed === 0) {
+              log(base + (texStats.total ? ('\n贴图 ' + texStats.ok + '/' + texStats.total + ' 张就绪 ✓') : ''));
+              requestRender();
+              return;
+          }
+          if (texStats.settled && failed > 0) {
+              var swapped = 0;
+              for (var j = 0; j < mats.length; j++) {
+                  var mm = mats[j];
+                  if (mm && mm.map && mm.map.image === undefined) {
+                      mm.map = null;
+                      mm.color.setHex(0xff2f6d);
+                      mm.needsUpdate = true;
+                      swapped++;
+                  }
+              }
+              var allFailed = texStats.ok === 0 && texStats.total > 0;
+              var msg = base + '\n贴图 ' + texStats.ok + '/' + texStats.total + ' 张成功，'
+                      + texStats.fail + ' 张失败' + (swapped ? ('（' + swapped + ' 个材质已用洋红占位）') : '');
+              if (texStats.failedUrls.length) {
+                  msg += '\n失败示例：\n  ' + texStats.failedUrls.join('\n  ');
+              }
+              msg += '\n常见原因：导出时未包含贴图文件（选了「不导出材质」）；贴图目录名与 MTL 里写的不一致；贴图 PNG 损坏。';
+              if (allFailed) {
+                  for (var k = 0; k < meshes.length; k++) {
+                      var node = meshes[k];
+                      if (!node.userData.__plain) node.userData.__plain = flatMaterial();
+                      node.material = node.userData.__plain;
+                  }
+                  texOn = false;
+                  toggle(document.getElementById('bTex'), false);
+                  msg += '\n全部贴图失败 → 已自动切换为纯色显示（点「贴图」可切回）。';
+              }
+              log(msg);
+              requestRender();
+              return;
+          }
+          log(base + '\n贴图加载中… 剩余 ' + pending + ' 张');
+          requestRender();
+          setTimeout(audit, 400);
+      };
+      setTimeout(audit, 300);
     }).catch(function (e) {
       var msg = String(e && e.message ? e.message : e);
       showErr('读取模型失败', msg + '\n\n常见原因：\n'
