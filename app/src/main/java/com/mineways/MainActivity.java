@@ -580,6 +580,12 @@ public class MainActivity extends AppCompatActivity {
         } catch (Throwable ignored) {
             // 老布局没有这张卡片时忽略
         }
+        // 首页独立入口：AI 动画助手（自然语言 → 动画/粒子 JSON 与 Molang）
+        try {
+            findViewById(R.id.card_ai).setOnClickListener(v ->
+                    startActivity(new Intent(this, AiAnimActivity.class)));
+        } catch (Throwable ignored) {
+        }
         findViewById(R.id.card_convert).setOnClickListener(v -> showPage(pageConvert));
         findViewById(R.id.card_world).setOnClickListener(v -> {
             showPage(pageWorld);

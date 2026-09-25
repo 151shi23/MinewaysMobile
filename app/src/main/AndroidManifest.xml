@@ -58,6 +58,14 @@
             android:configChanges="orientation|screenSize|uiMode|keyboard|keyboardHidden"
             android:theme="@style/Theme.MinewaysMobile" />
 
+        <!-- AI 动画助手：自然语言 → 基岩版动画/粒子 JSON 与 Molang（用户自配 OpenAI 兼容 API） -->
+        <activity
+            android:name=".AiAnimActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|uiMode|keyboard|keyboardHidden"
+            android:theme="@style/Theme.MinewaysMobile" />
+
         <!-- 内置小游戏《寂零快跑》（assets/minigame 下的纯静态 HTML5 跑酷，竖屏触屏操作） -->
         <activity
             android:name=".MiniGameActivity"
