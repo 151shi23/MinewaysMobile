@@ -442,6 +442,46 @@ Java_com_mineways_MainActivity_exportWorld(JNIEnv* env, jobject,
         17, 3, versionId, NULL, 16,
         userSelectedBiome, biomeIndex, groupCount, groupCountSize, groupCountArray);
 
+    // ---- 自动重试：掏空/删除浮动对象/焊接等 3D 打印结构选项**按设计会删内容** ----
+    // 「删除浮动对象」会删掉小于 floaterCount(默认16) 且不接地的方块组 —— 小模型/悬浮建筑会被整体删光，
+    // 核心就如实返回 MW_NO_BLOCKS_FOUND(512)。用户"清空应用数据后能导出"（偏好被重置）正是这个机理。
+    // 与其让用户猜是哪个开关干的：第一次 512 且没有产出任何文件时，自动关掉这组选项重试一次。
+    bool retriedWithoutPrintOptions = false;
+    if (errCode == MW_NO_BLOCKS_FOUND && outputFileList.count <= 0) {
+        for (int f = 0; f < FILE_TYPE_TOTAL; f++) {
+            efd.chkHollow[f] = 0;
+            efd.chkSuperHollow[f] = 0;
+        }
+        efd.chkSealEntrances = 0;
+        efd.chkSealSideTunnels = 0;
+        efd.chkFillBubbles = 0;
+        efd.chkConnectParts = 0;
+        efd.chkConnectCornerTips = 0;
+        efd.chkConnectAllEdges = 0;
+        efd.chkDeleteFloaters = 0;
+        efd.chkMeltSnow = 0;
+        Options optRetry;
+        assembleOptions(optRetry, efd, fileType);
+        if (dim == 1)      optRetry.worldType |= HELL;
+        else if (dim == 2) optRetry.worldType |= ENDER;
+        optRetry.exportFlags &= ~EXPT_3DPRINT;   // 结构处理整体撤掉，保证不再删内容
+
+        initOutputFileList(outputFileList);
+        userSelectedBiome = -1; biomeIndex = 0; groupCount = 0;
+        SetDimensionDirectory(&wg, optRetry.worldType);
+        int retryCode = SaveVolume(outBase, fileType, &optRetry, &wg, outDir,
+            minx, y0, minz, maxx, y1, maxz,
+            mapMinHeight, mapMaxHeight,
+            androidProgressCallback, terrainFileName, cullSchemeSelected, &outputFileList,
+            17, 3, versionId, NULL, 16,
+            userSelectedBiome, biomeIndex, groupCount, groupCountSize, groupCountArray);
+        if (outputFileList.count > 0 && retryCode < MW_BEGIN_ERRORS) {
+            retriedWithoutPrintOptions = true;
+            errCode = retryCode;   // 采用重试结果
+            opt = optRetry;        // 后续报告按重试后的装配输出
+        }
+    }
+
     // ---- 导出后：选区命中统计 + 组装"可直接粘贴反馈"的诊断报告 ----
     ExportDiag::scanSelection(worldDir, minx, minz, maxx, maxz, scan);
 
@@ -521,6 +561,11 @@ Java_com_mineways_MainActivity_exportWorld(JNIEnv* env, jobject,
                 + "  面剔除隐藏 " + I(culledTypes) + " 种\n";
         report += "    （核心放行一个方块要同时满足：类别位命中 saveFilterFlags + alpha>0 + 未被剔除；"
                   "下面 [选区实测] 里每种方块都标了具体数值与原因）\n";
+    }
+    if (retriedWithoutPrintOptions) {
+        report += "[自动重试] 第一次导出时，3D 打印结构选项（如「删除浮动对象」会删除小于 floaterCount 且"
+                  "不接地的方块组）把选区内容删光了，核心如实返回 512。已自动关闭这组选项并重试成功 —— "
+                  "本次导出不含掏空/焊接等结构处理；如需这些效果，请确保模型接地且足够大后再勾选。\n";
     }
     report += "[选区命中] 覆盖 " + I(scan.coveredChunks) + " 个区块坐标，其中磁盘上存在 "
             + I(scan.presentChunks) + " 个" + (scan.selectionCapped ? "（选区过大，统计已截断）" : "") + "\n";
