@@ -9,6 +9,13 @@
 **本仓库不包含任何编译好的 APK / AAB。** 请按下文自行构建。
 **This repository ships no prebuilt APK/AAB.** Build it yourself — see [构建 / Build](#构建--build).
 
+> **特别鸣谢 / Special thanks**
+> **蚩尤** —— 测试，找出多个重大 bug（导出选项失效、3D 预览、导出 0 方块、玻璃等方块漏导、维度错误、选择器三态…）
+> **ZERO寂灵** —— 策划与移植主导（功能取舍、与桌面版行为对齐、安卓端交互）
+>
+> **蚩尤 (Chiyou)** — testing: found several major bugs (broken export options, 3D preview, zero-block exports, missing block types such as glass, wrong dimension, the three-state selector…)
+> **ZERO寂灵 (ZERO Jiling)** — planning & porting lead (feature scoping, desktop-behaviour alignment, Android UX)
+
 ---
 
 ## 目录 / Table of Contents
@@ -20,6 +27,7 @@
   - [构建](#构建--build)
   - [目录结构](#目录结构)
   - [常见问题](#常见问题)
+  - [鸣谢](#鸣谢)
 - [English](#english)
   - [Features](#features)
   - [Export options: multi-select / single-select / none](#export-options-multi-select--single-select--none)
@@ -27,6 +35,7 @@
   - [Build](#build-1)
   - [Project layout](#project-layout)
   - [Troubleshooting](#troubleshooting)
+  - [Acknowledgements](#acknowledgements)
 - [许可 / License](#许可--license)
 - [第三方组件 / Third-party](#第三方组件--third-party)
 - [免责声明 / Disclaimer](#免责声明--disclaimer)
@@ -147,6 +156,17 @@ tools/                            # 构建 / 审计 / 离线化脚本
 
 **为什么有的选项勾了看起来没变化？** 选项效果多发生在 OBJ 内部结构或几何细节上（分组、焊接、掏空…）。报告里的 `[核心回执]` 是**核心自己写的生效状态**，一眼可核对是否真的生效。
 
+### 鸣谢
+
+本项目能走到今天，靠的是下面两位的持续投入 —— **同等重要，只是分工不同**：
+
+| 贡献者 | 角色 | 具体贡献 |
+|---|---|---|
+| **蚩尤** | 测试 | 测出并推动修复了**多个重大 bug**：导出选项点了不生效、3D 预览打不开、导出 0 方块（`MW_NO_BLOCKS_FOUND`）、玻璃等方块漏导、维度不对导致导出"货不对版"、单选组选上了取消不了、导出选项选择器三态等。每次都给出可复现的现象与导出报告，这是问题能被定位的关键。|
+| **ZERO寂灵** | 策划 / 移植 | 主导项目的策划与移植：功能取舍与优先级、与桌面版 Mineways 行为对齐（选项语义、默认值、导出结果一致性）、安卓端交互与整体推进节奏。|
+
+同时感谢上游开源项目：**Mineways**（Eric Haines）、**Chunker**（hivemc）、**three.js**、**Blockbench**、**lodepng** 等（许可见 [`THIRD_PARTY.md`](THIRD_PARTY.md)）；以及每一位提交反馈、帮忙测试的朋友。
+
 ---
 
 ## English
@@ -244,6 +264,17 @@ tools/                              # Build / audit / offline-asset scripts
 **Where do exports go?** With “package a ZIP into Downloads/MinewaysMobile” enabled, the ZIP lands in the public Downloads folder (Android 10+ uses MediaStore, no permission needed). On Android 8/9 the app asks for storage permission on first use; if denied, results fall back to the app-private folder.
 
 **Why do some options look like they do nothing?** Most options affect OBJ internals or geometry details (grouping, welding, hollowing…). The `[核心回执]` section of the report is the **core's own record** of what actually took effect — check it there.
+
+### Acknowledgements
+
+This project got where it is thanks to two people who kept at it — **equal credit, different roles**:
+
+| Contributor | Role | Contribution |
+|---|---|---|
+| **蚩尤 (Chiyou)** | Testing | Found and drove fixes for **several major bugs**: export options that had no effect, the 3D preview not opening, exports producing 0 blocks (`MW_NO_BLOCKS_FOUND`), missing block types (e.g. glass), "wrong map" exports caused by the missing dimension switch, radio options that could not be cleared, and the three-state option selector. Every report came with reproducible symptoms and export logs — that is what made them fixable. |
+| **ZERO寂灵 (ZERO Jiling)** | Planning / Porting | Led planning and the port: feature scoping and priorities, aligning behaviour with desktop Mineways (option semantics, defaults, output consistency), plus the Android UX and overall pace. |
+
+Thanks as well to the upstream open-source projects — **Mineways** (Eric Haines), **Chunker** (hivemc), **three.js**, **Blockbench**, **lodepng** and others (see [`THIRD_PARTY.md`](THIRD_PARTY.md)) — and to everyone who reports issues or helps test.
 
 ---
 
