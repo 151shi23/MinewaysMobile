@@ -35,6 +35,8 @@ import androidx.documentfile.provider.DocumentFile;
 
 import com.google.android.material.appbar.MaterialToolbar;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
+
+import com.mineways.mod.ModOutput;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.materialswitch.MaterialSwitch;
@@ -368,6 +370,37 @@ public class MainActivity extends AppCompatActivity {
                     Toast.makeText(this, "无法打开预览：" + t, Toast.LENGTH_LONG).show();
                 }
             });
+
+    /** 模组转换：选择一个或多个模组 jar / 资源包（多选）。 */
+    private final ActivityResultLauncher<String[]> pickModLauncher =
+            registerForActivityResult(new ActivityResultContracts.OpenMultipleDocuments(), uris -> {
+                if (uris == null || uris.isEmpty()) return;
+                StringBuilder sb = new StringBuilder();
+                for (Uri u : uris) {
+                    try {
+                        getContentResolver().takePersistableUriPermission(u,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    } catch (Throwable ignored) { }
+                    if (sb.length() > 0) sb.append('\n');
+                    sb.append(u.toString());
+                }
+                exportOpts().edit().putString("mod_uris", sb.toString()).apply();
+                Toast.makeText(this, "已选择 " + uris.size() + " 个模组文件", Toast.LENGTH_SHORT).show();
+            });
+
+    private int modUriCount() {
+        String s = exportOpts().getString("mod_uris", "");
+        if (s == null || s.isEmpty()) return 0;
+        return s.split("\n").length;
+    }
+
+    private java.util.List<Uri> decodeModUris(String s) {
+        java.util.List<Uri> out = new java.util.ArrayList<>();
+        if (s != null && !s.isEmpty()) for (String part : s.split("\n")) {
+            try { out.add(Uri.parse(part)); } catch (Throwable ignored) { }
+        }
+        return out;
+    }
 
     /** ZIP 选择入口（按钮与来源选择共用）。 */
     private void pickZip() {
@@ -1170,13 +1203,43 @@ public class MainActivity extends AppCompatActivity {
             // 原生首行协议：OK files=N / WARN files=N / ERR <code> <name>（后面跟诊断报告）
             // 只有 files>0 才算成功——以前只要不以 ERR 开头就报"导出成功"，
             // 于是 files=0 err=512（没有任何方块）也被显示成成功。
-            final boolean ok = isExportSuccess(r);
+            final boolean coreOk = isExportSuccess(r);
+            // 模组转换（默认关）：把选区内的模组方块按上传的模组文件合并进 OBJ/MTL。
+            // 这里刻意不看核心是否成功：纯模组选区（一个原版方块都没有）核心会 files=0，
+            // 但模组段照样要能导出，能不能落地交给 ModOutput 自己判断。
+            String modReport = null;
+            boolean modMerged = false;
+            if (exportOpts().getBoolean("modconvert", false)) {
+                try {
+                    java.util.List<Uri> modUris = decodeModUris(exportOpts().getString("mod_uris", ""));
+                    if (modUris.isEmpty()) {
+                        modReport = "[模组转换] 已开启但未选择模组文件：请在「导出选项 → 模组转换」里点「选择模组文件」。\n";
+                    } else {
+                        File objF = new File(outBase + ".obj");
+                        File mtlF = new File(outBase + ".mtl");
+                        File texDir = new File(exportDir, exportOpts().getString("tiledir", "tex"));
+                        boolean nf = new File(wdir, "dimensions").isDirectory();
+                        int dimV = exportOpts().getInt("dim", 0);
+                        if (dimV < 0) dimV = 0;
+                        ModOutput.Result mr = ModOutput.run(this, objF, mtlF, texDir, wdir, dimV, nf,
+                                minx, y0, minz, maxx, y1, maxz, modUris);
+                        modReport = mr.report;
+                        modMerged = mr.merged;
+                    }
+                } catch (Throwable t) {
+                    modReport = "[模组转换] 失败：" + t + "（原版导出结果未受影响）\n";
+                }
+            }
+            // 核心没找到任何方块、但模组段合并成功时，这次导出整体算成功——否则纯模组选区会被判"导出失败"，
+            // 连 ZIP 也不会发布，用户拿不到任何东西。
+            final boolean ok = coreOk || modMerged;
             // 成功时把结果（obj/mtl/贴图）打包成 zip 放到用户可见的「下载/MinewaysMobile/」：
             // 否则文件全在 Android/data/... 里，Android 11+ 文件管理器根本进不去，等于拿不到模型。
             final boolean wantZip = exportOpts().getBoolean("zip", true);
             final String published = (ok && wantZip) ? publishExportZipToDownloads() : null;
-            final String report = buildExportReport(r, wdir, minx, y0, minz, maxx, y1, maxz,
+            final String report = buildExportReport(r, ok, wdir, minx, y0, minz, maxx, y1, maxz,
                     cullStr, decimateOn)
+                    + (modReport != null ? ("\n" + modReport) : "")
                     + (published != null ? ("\n[已导出 ZIP] " + published + "\n") : "");
             runOnUiThread(() -> {
                 tvResult.setText(report);
@@ -1208,11 +1271,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /** 组装最终报告：环境/参数上下文 + 原生诊断报告，便于用户整段粘贴反馈。 */
-    private String buildExportReport(String nativeResult, File worldDir,
+    private String buildExportReport(String nativeResult, boolean ok, File worldDir,
                                      int minx, int miny, int minz, int maxx, int maxy, int maxz,
                                      String cullStr, int decimateOn) {
         StringBuilder sb = new StringBuilder();
-        sb.append(isExportSuccess(nativeResult) ? "导出完成\n" : "导出失败\n");
+        sb.append(ok ? "导出完成\n" : "导出失败\n");
         sb.append("—— 环境信息 ——\n");
         sb.append("[应用] Mineways Mobile ").append(appVersionName()).append('\n');
         sb.append("[系统] Android ").append(android.os.Build.VERSION.RELEASE)
@@ -1876,7 +1939,7 @@ public class MainActivity extends AppCompatActivity {
             {"connectcorners", false}, {"connectalledges", false}, {"deletefloaters", false},
             {"compositeoverlay", false}, {"dbggroups", false}, {"dbgwelds", false},
             {"showparts", false}, {"showwelds", false}, {"exportall", true}, {"mdl", false},
-            {"biome", false}, {"cremodel", true}, {"zip", true},
+            {"biome", false}, {"cremodel", true}, {"zip", true}, {"modconvert", false},
     };
 
     /**
@@ -2083,6 +2146,29 @@ public class MainActivity extends AppCompatActivity {
 
         root.addView(optTitle("输出"));
         root.addView(optSwitch("zip", "导出后打包 ZIP 到「下载/MinewaysMobile」", true));
+
+        root.addView(optTitle("模组转换（实验性，默认关）"));
+        root.addView(optSwitch("modconvert", "开启模组转换：选区内的模组方块按上传的模组文件生成几何与贴图（仅支持绝对坐标 OBJ）", false));
+        {
+            int n = modUriCount();
+            com.google.android.material.button.MaterialButton btnMod =
+                    new com.google.android.material.button.MaterialButton(this);
+            btnMod.setText("选择模组文件（jar/资源包，已选 " + n + " 个）");
+            btnMod.setTextSize(12);
+            btnMod.setOnClickListener(v -> {
+                try {
+                    pickModLauncher.launch(new String[]{"*/*"});
+                } catch (Throwable t) {
+                    Toast.makeText(this, "打不开文件选择器：" + t, Toast.LENGTH_SHORT).show();
+                }
+            });
+            root.addView(btnMod);
+            TextView modHint = new TextView(this);
+            modHint.setTextSize(12);
+            modHint.setTextColor(0xFF9AA0A6);
+            modHint.setText("支持 Forge/Fabric 模组 jar 与资源包；先导出一次看报告里的「模组方块清单」，再上传包含这些方块的模组。multipart 与连接性方块会降级为占位。");
+            root.addView(modHint);
+        }
 
         box[0] = new MaterialAlertDialogBuilder(this)
                 .setTitle("导出选项（改动即保存，下次导出生效）")

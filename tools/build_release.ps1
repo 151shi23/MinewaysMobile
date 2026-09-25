@@ -10,7 +10,7 @@
   用法：
     powershell -ExecutionPolicy Bypass -File neteasemc\tools\build_release.ps1
     # 口令未提供时读环境变量 MINEWAYS_STOREPASS；仍为空则交互输入
-    #   -StorePass <口令>   -Alias cc   -Sandbox C:\mmbuild
+    #   -StorePass <口令>   -Alias mineways   -Sandbox C:\mmbuild
     #   -SkipSign          只构建不签名
     #   -Offline           强制离线（依赖已全部缓存时更快）
 
@@ -20,7 +20,7 @@
 [CmdletBinding()]
 param(
     [string]$StorePass = 'Mineways2026',
-    [string]$Alias = 'cc',
+    [string]$Alias = 'mineways',
     [string]$Sandbox = 'C:\mmbuild',
     [switch]$SkipSign,
     [switch]$Offline

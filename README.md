@@ -27,6 +27,7 @@
 - [中文说明](#中文说明)
   - [功能](#功能)
   - [导出选项的三态：多选 / 单选 / 不选](#导出选项的三态多选--单选--不选)
+  - [模组转换：模组地图 → OBJ](#模组转换模组地图--obj)
   - [环境要求](#环境要求)
   - [构建](#构建--build)
   - [目录结构](#目录结构)
@@ -35,6 +36,7 @@
 - [English](#english)
   - [Features](#features)
   - [Export options: multi-select / single-select / none](#export-options-multi-select--single-select--none)
+  - [Mod conversion: modded maps → OBJ](#mod-conversion-modded-maps--obj)
   - [Requirements](#requirements)
   - [Build](#build-1)
   - [Project layout](#project-layout)
@@ -62,6 +64,7 @@
 | **面剔除** | 全显示 / 标准（隐藏 barrier、structure_void）/ 强剔除（再加 structure_block）|
 | **3D 预览（独立界面）** | 开源 **three.js** 离线渲染 OBJ，自动读同目录 MTL 与贴图；单指旋转、双指缩放，可切线框/贴图/双面/自动旋转；也能直接挑任意 `.obj` 或先看 ZIP |
 | **诊断报告** | 每次导出都生成可粘贴的报告：世界体检、选区命中、`[选区实测]`（读到的方块类型 / Y 分层 / 俯视高度图）、`[核心回执]`（核心自己记录的生效选项）、`[导出内容]`（实际写进 OBJ 的材质清单，含 glass 探测）、`[对等性自检]`（顶点包围盒 vs 核心声明尺寸：缩放比 / 是否越界 / 坐标轴方向）|
+| **模组转换（实验性，默认关）** | 选区内**模组方块**（非 `minecraft:` 命名空间）也一并导出：可从模组 jar / 资源包解析方块模型与贴图，追加进核心导出的同一个 OBJ —— 详见 [模组转换](#模组转换模组地图--obj) |
 | **内置工具** | 网页版 Blockbench（离线）、小游戏《寂零快跑》、世界信息与工具页 |
 
 ### 导出选项的三态：多选 / 单选 / 不选
@@ -77,6 +80,58 @@
 - **不选**以 `-1` 存盘，导出时按该键**默认值**发送 —— 行为等同于"从未设置过"，不会产生奇怪结果。
 - 面板顶部另有 **全不选 / 全选 / 恢复默认** 三个快捷动作，改完立即生效（下次导出使用）。
 - 所有选项**改动即保存**，无需额外确认。
+
+### 模组转换：模组地图 → OBJ
+
+**核心转换依旧是 Mineways 本身**，模组转换只是**叠在它后面的一层追加器**：先让 Mineways 核心照常把原版方块导出成 OBJ/MTL，再把选区内**模组方块**（不在 `minecraft:` 命名空间里的方块，如 `mymod:machine`）的几何与贴图**追加**进同一个 OBJ/MTL。核心代码一行未改。
+
+#### 怎么用
+
+1. 先**正常导出一次**（不勾模组转换）。报告里的 `[选区实测]` 会列出选区内读到的方块类型，模组方块就在里面。
+2. 「导出选项」→ 打开 **模组转换（实验性，默认关）**。
+3. 点 **选择模组文件**，可多选该存档用到的 **模组 jar** 或**资源包 zip**（要包含报告里那些方块名的模组）。
+4. 再导出一次。报告末尾会出现 `[模组转换]` 段落，OBJ/MTL 里就多了模组几何。
+
+#### 三步流程
+
+| 步骤 | 实现 | 做什么 |
+|---|---|---|
+| ① 扫描 | `mod/ModBlockScanner.java` | **只读**扫选区覆盖的 `region/*.mca`（现代 Anvil 调色板格式）：取每个 section 的 `block_states.palette` 方块名 + `Properties`（键排序后拼成属性串，如 `facing=north,lit=true,`），再按调色板位宽解包 `data` 长整型数组还原每格。整段只有一种方块时 MC 会**省略 `data` 数组**，这种情况按 4096 格逐格铺开。名字带 `minecraft:` 的算原版（交给核心），其余计入模组。 |
+| ② 解析 | `mod/ModModelResolver.java` | 从所选 jar/zip 索引 `assets/<命名空间>/models/block/*.json`、`blockstates/*.json`、`textures/*.png`；按 `variants` 条件打分选出模型，走 `parent` 继承链合并贴图（子覆盖父），把 `elements` 的 `from/to`（1/16 单位）与 `faces.uv` 展开成四边形，并解析 `#引用` 贴图链。 |
+| ③ 输出 | `mod/ModOutput.java` | 核心导出的 OBJ/MTL 已就位后，把模组四边形**追加**进去（`mod_block_N_<方块状态>` 分组、材质名前缀 `mod_`）；坐标由「扫描器量到的原版方块世界包围盒」与「OBJ 实测顶点包围盒」反解，**不假设核心内部常量**。全程先写临时文件再拼接，失败时原版导出结果不受影响。 |
+
+#### 坐标为什么是对的
+
+Mineways 的**绝对坐标 OBJ** 有固定约定：**X 轴镜像**（顶点 `objX = -世界X`）、**Y/Z 与世界坐标一致**、**1 单位 = 1 方块**。模组段严格按同一条公式落地，并额外做两道校验：
+
+- **实测标定**：用「原版方块在 OBJ 里的实际包围盒」解出镜像方向与三轴平移量，而不是硬编码常量。正常情况下偏移解出来就是 `0`（报告里的 `坐标标定：X=镜像，偏移=(0, 0, 0)`）。
+- **跨度护栏**：把 OBJ 实测跨度与扫描器量到的原版方块跨度互相印证。两者出自同一批方块，正常必须相等；若相差超过 2.5（说明核心对模型做了**整体缩放或换轴旋转**，例如 3D 打印尺寸 / 旋转 / Z 向上），则**跳过合并并在报告里说明原因** —— 宁可不出模组段，也不把方块放歪。
+
+另外**材质按「贴图」建、逐面切换 `usemtl`**：柱、工作台这类不同面用不同贴图的方块，不会所有面都贴上第一张图。
+
+#### 纯模组选区
+
+如果选区内**一个原版方块都没有**（纯模组建筑），Mineways 核心按设计会返回 `files=0 / err=512`（没有任何方块），连 OBJ 都不会产出。这时模组转换会**新建**一个 OBJ（并补上缺失的 `mtllib` 头，否则查看器不会去读 MTL、模组方块会变成白模），整个导出仍算成功并照常打包 ZIP，报告里会写明「核心没在选区内找到原版方块，已新建仅含模组方块的 OBJ」。
+
+#### 已知限制
+
+- **只支持绝对坐标 OBJ**：本版本输出格式固定为绝对坐标（`FILE_TYPE_WAVEFRONT_ABS_OBJ`），相对坐标模式未做适配。
+- **只认现代 Anvil 调色板格式**（`block_states.palette` / `data`）的区块。
+- **降级为占位色立方体**的情况：模组父模型继承链超过一级、`multipart` 方块（栅栏、楼梯、红石线一类）、连接性方块，以及所选 jar 里**找不到**对应模型/贴图的方块。报告会给出"解析成功 N 种，降级 M 种"。
+- **只处理方块模型**（`models/block/`），实体与物品模型不处理。
+- 扫描器把 `minecraft:` 命名空间一律算原版：若核心不认其中某个方块（例如水、或被面剔除/过滤掉的方块），跨度护栏会**直接跳过合并**并说明原因。
+
+#### 在报告里核对
+
+```
+[模组转换] 选区内模组方块 3 种 / 148 个实例
+坐标标定：X=镜像，偏移=(0, 0, 0)
+解析成功 3 种，降级 0 种（缺模型/multipart/连接性方块 → 占位色立方体）
+已合并进 OBJ/MTL（模组段独立成组，材质名前缀 mod_）
+```
+
+- `偏移` 正常应为 `(0, 0, 0)`；`X=镜像` 是既定约定，不是错误。
+- 想确认哪些方块没贴上正确贴图，就在 MTL 里查 `mod_` 开头的材质；想确认哪一段是模组几何，就在 OBJ 里查 `mod_block_` 开头的分组。
 
 ### 环境要求
 
@@ -129,13 +184,34 @@ apksigner sign --ks my-release.jks --ks-key-alias myalias \
   --out MinewaysMobile-release.apk app-aligned.apk
 ```
 
-Windows PowerShell 一键脚本见 `tools/build_release.ps1`（Gradle 构建 → zipalign → apksigner → 复制成品）。
+#### Windows 一键脚本
+
+```powershell
+powershell -ExecutionPolicy Bypass -File neteasemc\tools\build_release.ps1
+```
+
+参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `-StorePass` | `Mineways2026` | 密钥库口令（store 与 key 同一口令）；留空时先读环境变量 `MINEWAYS_STOREPASS`，再交互输入 |
+| `-Alias` | `mineways` | **必须与 keystore 里实际存在的 PrivateKeyEntry 别名一致**，否则报 `entry ... does not contain a key` |
+| `-Sandbox` | `C:\mmbuild` | 纯 ASCII 构建沙箱 |
+| `-SkipSign` | — | 只构建不签名 |
+| `-Offline` | — | 强制 Gradle 离线（依赖已全部缓存时更快）|
+
+脚本会依次做六件事：清空并重建沙箱 → `gradle :app:assembleDebug :app:assembleRelease` → `zipalign -P 16` + `apksigner` 签名 → 核验（证书指纹、`aapt2` 校验 Activity 注册与小游戏/Blockbench 资产是否在包内）→ **Java 9+ 类型自检**（扫 dex 里是否引用了旧 Android 上不存在的 `System$Logger` / `Module` / `HexFormat` / `StackWalker` 等）→ 把成品复制到工作区根目录与 `产物\`。
+
+> **脚本文件必须保存为 UTF-8 with BOM。** Windows PowerShell 5.1 会按 ANSI 解析无 BOM 的文件，中文路径与提示会全部乱码，甚至报 `Error formatting a string`。编辑保存时请保留 BOM。
+>
+> 沙箱复制阶段可能出现 `robocopy ... being used by another process`：那是 IDE 或 Gradle 守护进程占用了 `C:\mmbuild\app\build` 下的 dex 文件，**不影响构建结果**；想消除告警就先关掉打开该目录的 IDE 或执行 `gradle --stop`。
 
 ### 目录结构
 
 ```
 app/
   src/main/java/com/mineways/     # 界面与安卓侧逻辑（导出、预览、转换、解密…）
+      mod/                        # 模组转换（扫描模组方块 / 解析模型贴图 / 追加进 OBJ）
   src/main/cpp/                   # JNI 入口 + 导出诊断
       core/                       # Mineways 核心（读档、网格生成、OBJ/MTL 写出）
   src/main/assets/
@@ -165,6 +241,18 @@ tools/                            # 构建 / 审计 / 离线化脚本
 再结合 `[导出内容]`（实际写进模型的材质清单）与 `[选区实测]`（读到的方块类型 / Y 分层），即可确认"读进来 → 写出去"全链路一致。
 
 **为什么有的选项勾了看起来没变化？** 选项效果多发生在 OBJ 内部结构或几何细节上（分组、焊接、掏空…）。报告里的 `[核心回执]` 是**核心自己写的生效状态**，一眼可核对是否真的生效。
+
+**开了模组转换，OBJ 里还是没有模组方块？** 按报告里的 `[模组转换]` 段落逐条看：
+
+| 报告现象 | 原因与处理 |
+|---|---|
+| `选区内没有模组方块（原版方块由核心处理）` | 选区内确实只有 `minecraft:` 方块；确认框选真的盖住了模组建筑 |
+| `未能从所选文件解析出任何模型/方块状态` | 选的文件不是模组 jar / 资源包；换上**包含这些方块名**的模组再导 |
+| `已跳过合并：核心对模型做了整体缩放或换轴旋转…` | 跨度护栏生效：多半是开了 3D 打印尺寸 / 旋转 / Z 向上。关掉这些选项再导，模组段才能与原版对齐 |
+| `解析成功 N 种，降级 M 种` | 降级的方块被画成**占位色立方体**（父模型链过深 / `multipart` / 缺贴图），几何位置仍然正确 |
+| 报告正常但看不到模组方块 | 用 App 内置 3D 预览，或在 OBJ 里搜 `mod_block_` 分组 / 在 MTL 里搜 `mod_` 材质，确认是否只是查看器没加载贴图 |
+
+**纯模组建筑（选区内没有原版方块）导出时报"没有找到方块"？** 3.9 起不会了：核心返回 `files=0` 时，模组转换会新建 OBJ 并补 `mtllib` 头，导出照常成功、ZIP 照常打包。但仍**必须先打开模组转换并选好模组文件**，否则确实拿不到任何几何。
 
 ### 鸣谢
 
@@ -198,6 +286,7 @@ tools/                            # 构建 / 审计 / 离线化脚本
 | **Culling schemes** | Show all / Standard (hide barrier & structure_void) / Aggressive (also structure_block) |
 | **3D preview (dedicated screen)** | Open-source **three.js** renders the OBJ offline and auto-loads the sibling MTL + textures; one-finger orbit, pinch zoom, wireframe / texture / double-side / autorotate toggles; you can also pick any `.obj` directly or preview a ZIP |
 | **Diagnostics report** | Every export yields a copy-pasteable report: world health check, selection hit stats, `[选区实测]` (block types read / Y bands / top-down height map), `[核心回执]` (the core's own record of effective options), `[导出内容]` (materials actually written to the OBJ, incl. a glass probe), `[对等性自检]` (vertex bounding box vs the core's declared size: scale ratio / out-of-selection / axis orientation) |
+| **Mod conversion (experimental, off by default)** | Exports **modded blocks** (anything outside the `minecraft:` namespace) too: resolves their models and textures from mod jars / resource packs and appends them into the same OBJ the core produced — see [Mod conversion](#mod-conversion-modded-maps--obj) |
 | **Built-ins** | Offline web Blockbench, the mini-game 《寂零快跑》, world-info/tools page |
 
 ### Export options: multi-select / single-select / none
@@ -213,6 +302,58 @@ The **Export options** panel (button on the export page, or long-press *Start ex
 - “None” is stored as `-1` and sent as **that key's default value** at export time — identical to “never set”.
 - The panel header also offers **clear all / select all / restore defaults**, applied immediately.
 - Changes are saved on the spot; the next export uses them.
+
+### Mod conversion: modded maps → OBJ
+
+**The core conversion is still Mineways itself.** Mod conversion is only an **append layer stacked on top of it**: the Mineways core exports the vanilla blocks to OBJ/MTL exactly as before, and then the modded blocks in the selection (anything not in the `minecraft:` namespace, e.g. `mymod:machine`) have their geometry and textures **appended** into that same OBJ/MTL. Not a single line of the core was changed.
+
+#### How to use it
+
+1. Export normally once (mod conversion off). The report's `[选区实测]` lists the block types found in the selection — your modded blocks are among them.
+2. Open **Export options** → enable **Mod conversion (experimental, off by default)**.
+3. Tap **Choose mod files** and multi-select the **mod jars** or **resource-pack zips** that contain those block names.
+4. Export again. A `[模组转换]` block appears at the end of the report and the OBJ/MTL now includes the modded geometry.
+
+#### The three stages
+
+| Stage | Implementation | What it does |
+|---|---|---|
+| ① Scan | `mod/ModBlockScanner.java` | **Read-only** scan of the `region/*.mca` files covering the selection (modern Anvil palette format): reads each section's `block_states.palette` names plus `Properties` (keys sorted into a property string such as `facing=north,lit=true,`), then unpacks the `data` long array using the palette bit width to recover every cell. When a whole section holds a single block type, Minecraft **omits the `data` array** — that case is expanded across all 4096 cells. Names under `minecraft:` count as vanilla (left to the core); everything else is a modded block. |
+| ② Resolve | `mod/ModModelResolver.java` | Indexes `assets/<namespace>/models/block/*.json`, `blockstates/*.json` and `textures/*.png` inside the chosen jars/zips; scores `variants` conditions to pick a model, walks the `parent` chain merging textures (child overrides parent), and expands `elements` (`from`/`to` in 1/16 units, `faces.uv`) into quads, resolving `#ref` texture chains. |
+| ③ Output | `mod/ModOutput.java` | Once the core's OBJ/MTL exists, the modded quads are **appended** (`mod_block_N_<block state>` groups, `mod_` material prefix). Coordinates are solved from *“the vanilla world bounding box measured by the scanner”* vs *“the OBJ's measured vertex bounding box”* — **no assumption about core internals**. Everything goes through a temp file first, so a failure never damages the vanilla export. |
+
+#### Why the coordinates are right
+
+An **absolute-coordinate Mineways OBJ** follows a fixed convention: the **X axis is mirrored** (vertex `objX = -worldX`), **Y/Z match world coordinates**, and **1 unit = 1 block**. The modded geometry uses exactly the same formula, plus two extra checks:
+
+- **Measured calibration**: the mirror direction and the three-axis translation are solved from the vanilla blocks' *actual* bounding box in the OBJ, not hard-coded. In the normal case the offset solves to `0` (report line `坐标标定：X=镜像，偏移=(0, 0, 0)`).
+- **Span guard**: the OBJ's measured span is cross-checked against the vanilla span the scanner measured. Both come from the same blocks, so they must match; if they differ by more than 2.5 (meaning the core **scaled or re-oriented the whole model** — 3D-print sizing, rotation, Z-up…), the merge is **skipped with an explanation in the report** — better no modded geometry than blocks placed wrongly.
+
+Materials are also created **per texture, switching `usemtl` face by face**, so pillars, crafting tables and other multi-texture blocks don't end up with the first texture on every face.
+
+#### Pure-mod selections
+
+If the selection contains **no vanilla blocks at all** (a purely modded build), the Mineways core by design returns `files=0 / err=512` (no blocks) and writes no OBJ. Mod conversion then **creates** the OBJ (adding the `mtllib` line it would otherwise lack — without it viewers never load the MTL and the modded blocks render untextured), the export still counts as successful and still gets zipped, and the report states “核心没在选区内找到原版方块，已新建仅含模组方块的 OBJ”.
+
+#### Known limitations
+
+- **Absolute-coordinate OBJ only**: this version's output format is fixed to absolute coordinates (`FILE_TYPE_WAVEFRONT_ABS_OBJ`); relative mode is not adapted.
+- **Modern Anvil palette format only** (`block_states.palette` / `data`).
+- **Fall back to a placeholder-coloured cube**: mod models whose parent chain goes deeper than one level, `multipart` blocks (fences, stairs, redstone wire…), connectivity blocks, and blocks whose model/texture is **not found** in the chosen jars. The report prints “解析成功 N 种，降级 M 种”.
+- **Block models only** (`models/block/`); entity and item models are not handled.
+- The scanner treats everything under `minecraft:` as vanilla: if the core doesn't recognise one of those blocks (water, or a block removed by culling/filters), the span guard **skips the merge** and says why.
+
+#### Verifying it from the report
+
+```
+[模组转换] 选区内模组方块 3 种 / 148 个实例
+坐标标定：X=镜像，偏移=(0, 0, 0)
+解析成功 3 种，降级 0 种（缺模型/multipart/连接性方块 → 占位色立方体）
+已合并进 OBJ/MTL（模组段独立成组，材质名前缀 mod_）
+```
+
+- The `偏移` (offset) should normally be `(0, 0, 0)`; `X=镜像` (mirrored) is the established convention, not a bug.
+- To find textures that failed, search the MTL for materials starting with `mod_`; to find which geometry is modded, search the OBJ for `mod_block_` groups.
 
 ### Requirements
 
@@ -250,12 +391,31 @@ apksigner sign --ks my-release.jks --ks-key-alias myalias \
   --out MinewaysMobile-release.apk app-aligned.apk
 ```
 
-On Windows, a PowerShell pipeline is provided in `tools/build_release.ps1`.
+On Windows, a PowerShell pipeline is provided in `tools/build_release.ps1`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File neteasemc\tools\build_release.ps1
+```
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `-StorePass` | `Mineways2026` | Keystore password (same for store and key); if empty, the `MINEWAYS_STOREPASS` env var is read, then it prompts |
+| `-Alias` | `mineways` | **Must match an actual PrivateKeyEntry alias in the keystore**, otherwise apksigner fails with `entry ... does not contain a key` |
+| `-Sandbox` | `C:\mmbuild` | Plain-ASCII build sandbox |
+| `-SkipSign` | — | Build only, don't sign |
+| `-Offline` | — | Force Gradle offline (faster when all dependencies are cached) |
+
+The script does six things in order: wipe and rebuild the sandbox → `gradle :app:assembleDebug :app:assembleRelease` → `zipalign -P 16` + `apksigner` → verify (certificate fingerprint; `aapt2` checks that the Activities are registered and that the mini-game / Blockbench assets are inside the APK) → **Java 9+ type audit** (scans the dex files for references to `System$Logger` / `Module` / `HexFormat` / `StackWalker`, absent on older Android) → copy the artifacts to the workspace root and `产物\`.
+
+> **The script file must be saved as UTF-8 with BOM.** Windows PowerShell 5.1 parses BOM-less files as ANSI, garbling every Chinese path and message and even failing with `Error formatting a string`. Keep the BOM when editing.
+>
+> You may see `robocopy ... being used by another process` during the sandbox copy: an IDE or Gradle daemon is holding dex files under `C:\mmbuild\app\build`. It **does not affect the build**; to silence it, close that directory in your IDE or run `gradle --stop`.
 
 ### Project layout
 
 ```
 app/src/main/java/com/mineways/     # UI + Android-side logic (export, preview, convert, decrypt…)
+app/src/main/java/com/mineways/mod/ # Mod conversion (scan modded blocks / resolve models / append to OBJ)
 app/src/main/cpp/                   # JNI entry points + export diagnostics
 app/src/main/cpp/core/              # Mineways core (world reading, meshing, OBJ/MTL writing)
 app/src/main/assets/objviewer/      # Offline 3D viewer (three.js + OBJLoader/MTLLoader/OrbitControls)
@@ -283,6 +443,18 @@ tools/                              # Build / audit / offline-asset scripts
 Together with `[导出内容]` (what was actually written) and `[选区实测]` (what was read), this verifies the whole "read → write" chain.
 
 **Why do some options look like they do nothing?** Most options affect OBJ internals or geometry details (grouping, welding, hollowing…). The `[核心回执]` section of the report is the **core's own record** of what actually took effect — check it there.
+
+**Mod conversion is on, but the OBJ still has no modded blocks?** Read the `[模组转换]` section of the report line by line:
+
+| What the report says | Cause and what to do |
+|---|---|
+| `选区内没有模组方块（原版方块由核心处理）` | The selection really only contains `minecraft:` blocks; make sure the box actually covers the modded build |
+| `未能从所选文件解析出任何模型/方块状态` | The file is not a mod jar / resource pack; pick a mod that **contains these block names** and export again |
+| `已跳过合并：核心对模型做了整体缩放或换轴旋转…` | The span guard tripped: usually 3D-print sizing / rotation / Z-up is enabled. Turn those off so the modded section can align with vanilla geometry |
+| `解析成功 N 种，降级 M 种` | Degraded blocks are drawn as **placeholder colour cubes** (deep parent chain / `multipart` / missing texture); their position is still correct |
+| Report looks fine but you can't see modded blocks | Use the in-app 3D preview, or search the OBJ for `mod_block_` groups / the MTL for `mod_` materials to confirm it is only the viewer failing to load textures |
+
+**Mod-only build (no vanilla block in the selection) reports “no blocks found”?** Not since 3.9: when the core returns `files=0`, mod conversion creates the OBJ itself and adds the missing `mtllib` header, so the export still succeeds and the ZIP is still published. You do still have to **enable mod conversion and pick the mod files** first — otherwise there is genuinely no geometry to write.
 
 ### Acknowledgements
 
