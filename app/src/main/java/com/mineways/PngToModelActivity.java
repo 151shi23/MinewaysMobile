@@ -213,6 +213,12 @@ public class PngToModelActivity extends AppCompatActivity {
                     h = nh;
                     factor = f;
                 }
+                // 交付核心在 OBJ 侧有三处会让"模型没颜色"的缺口（颜色本身是好的），这里按真实落盘名兜住：
+                //   ① 输出里没有 mtllib 行 —— 查看器/Blender/内置预览都不会去加载 .mtl，模型全白；
+                //   ② 材质与贴图被硬编码为 texture / texture.png，而落盘的是 <名字>.mtl / <名字>.png；
+                //   ③ 面行写成 v/vt//vn（四段），不是 OBJ 标准的 v/vt/vn，部分解析器直接失败。
+                res.obj = remapObj(res.obj, name);
+                res.mtl = remapMtl(res.mtl, name);
                 outW = res.lw;
                 outH = res.lh;
             } catch (Throwable t) {
@@ -244,6 +250,40 @@ public class PngToModelActivity extends AppCompatActivity {
                 tvStatus.setText(msg);
             });
         }, "png-to-model").start();
+    }
+
+    /**
+     * OBJ 落盘前的引用对齐：补 mtllib 行、把材质名改成与落盘一致、面行规范为 v/vt/vn。
+     * <p>不改动交付核心源码，缺口的成因与修法都写在调用处注释里。
+     */
+    private static String remapObj(String obj, String base) {
+        StringBuilder sb = new StringBuilder(obj.length() + 64);
+        boolean mtlDone = false;
+        for (String line : obj.split("\n", -1)) {
+            if (line.startsWith("# pixel-art")) {
+                line = line.replace("tex=texture", "tex=" + base);
+            } else if (line.startsWith("usemtl ")) {
+                line = "usemtl " + base;
+            } else if (line.startsWith("f ")) {
+                // v/vt//vn → v/vt/vn（OBJ 标准三段式）
+                line = line.replaceAll("(\\d+)/(\\d+)//(\\d+)", "$1/$2/$3");
+            }
+            sb.append(line).append('\n');
+            if (!mtlDone && line.startsWith("# pixel-art")) {
+                sb.append("mtllib ").append(base).append(".mtl\n");
+                mtlDone = true;
+            }
+        }
+        if (!mtlDone) {
+            sb.insert(0, "mtllib " + base + ".mtl\n");
+        }
+        return sb.toString();
+    }
+
+    /** MTL 落盘前的引用对齐：材质名与 map_Kd 指向真实写出的 <base>.png。 */
+    private static String remapMtl(String mtl, String base) {
+        return mtl.replace("newmtl texture", "newmtl " + base)
+                .replace("map_Kd texture.png", "map_Kd " + base + ".png");
     }
 
     /** 整数倍最近邻降采样（保留原始像素色，背景判定不受影响）。 */
