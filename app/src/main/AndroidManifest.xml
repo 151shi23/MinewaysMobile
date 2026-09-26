@@ -15,6 +15,10 @@
          仅 Android 8/9 需要它；未授权时导出会退回应用私有目录，文件不会丢。 -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
+    <!-- 「网易存档解密导出」直读公共目录里的存档需要读权限（Android 8~12）；
+         13+ 该位置基本落在应用私有沙箱内，由 Shizuku 提权或“手动指定文件夹”覆盖，故上限到 32。 -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:name=".MinewaysApp"

@@ -248,6 +248,7 @@ public class MainActivity extends AppCompatActivity {
         setUpConvertPage();
         setUpHomePage();
         setUpToolsPage();
+        setUpNeteasePage();
 
         registerShizukuPermissionListener();
         updateShizukuStatus();
@@ -2407,5 +2408,184 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
         }).start();
+    }
+
+    // ================= 网易版存档：扫描 → 解密 → 导出到下载目录 =================
+    // 「世界信息」页的重定位实现：该页的职责就是"通过权限找到网易版存档 → 解密 → 输出到下载目录"。
+    // 扫描分三层：① 直读（能读到就扫）② Shizuku 提权（Android 11+ 对 /Android/data 的强制隔离）
+    // ③ 手动指定文件夹（SAF）。解密只作用于副本（Android/media 临时区），绝不改动玩家原存档。
+
+    /** 当前选中的待导出存档（null 表示未选）。 */
+    private NeteaseWorldScanner.World selectedWorld;
+
+    /** 手动指定存档文件夹（SAF），可直接读到用户可见位置。 */
+    private final ActivityResultLauncher<Uri> pickNeteaseTreeLauncher =
+            registerForActivityResult(new ActivityResultContracts.OpenDocumentTree(), uri -> {
+                if (uri == null) return;
+                try {
+                    getContentResolver().takePersistableUriPermission(uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                } catch (Throwable ignored) {
+                }
+                exportNeteaseFromTree(uri);
+            });
+
+    private void setUpNeteasePage() {
+        try {
+            findViewById(R.id.btn_world_scan).setOnClickListener(v -> startNeteaseScan(false));
+            findViewById(R.id.btn_world_scan_shizuku).setOnClickListener(v -> startNeteaseScan(true));
+            findViewById(R.id.btn_world_pick).setOnClickListener(v -> {
+                try {
+                    pickNeteaseTreeLauncher.launch(null);
+                } catch (Throwable t) {
+                    tvShizukuStatus.setText("无法打开文件选择器：" + t.getMessage());
+                }
+            });
+            findViewById(R.id.btn_world_export).setOnClickListener(v -> exportSelectedNeteaseWorld());
+            findViewById(R.id.btn_world_open_download).setOnClickListener(v -> openNeteaseDownloads());
+        } catch (Throwable ignored) {
+        }
+        updateNeteaseButtons();
+    }
+
+    /** 扫描网易版存档；useShizuku 为真时先确保 Shizuku 已授权再扫。 */
+    private void startNeteaseScan(final boolean useShizuku) {
+        // Android 8~12：直读公共目录需要读权限；缺权限时先申请（拒绝也不阻断，
+        // 扫描会自动跳过读不到的目录，用户仍可走 Shizuku 或手动指定）。
+        try {
+            if (Build.VERSION.SDK_INT <= 32
+                    && checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE}, 2801);
+            }
+        } catch (Throwable ignored) {
+        }
+        if (useShizuku) {
+            boolean ready;
+            try {
+                ready = ShizukuWorldImporter.isReady();
+            } catch (Throwable t) {
+                ready = false;
+            }
+            if (!ready) {
+                tvShizukuStatus.setText(R.string.shizuku_requesting);
+                ShizukuWorldImporter.requestPermission(message -> runOnUiThread(() -> {
+                    updateShizukuStatus();
+                    startNeteaseScan(true);
+                }));
+                return;
+            }
+        }
+        tvShizukuStatus.setText(R.string.world_scanning);
+        new Thread(() -> {
+            final List<NeteaseWorldScanner.World> worlds = NeteaseWorldScanner.scan(useShizuku,
+                    msg -> runOnUiThread(() -> tvShizukuStatus.setText(msg)));
+            runOnUiThread(() -> onNeteaseScanDone(worlds, useShizuku));
+        }, "netease-scan").start();
+    }
+
+    private void onNeteaseScanDone(List<NeteaseWorldScanner.World> worlds, boolean usedShizuku) {
+        if (worlds.isEmpty()) {
+            selectedWorld = null;
+            tvShizukuStatus.setText(usedShizuku ? R.string.world_none_shizuku : R.string.world_none);
+            updateNeteaseButtons();
+            return;
+        }
+        String[] items = new String[worlds.size()];
+        for (int i = 0; i < worlds.size(); i++) {
+            NeteaseWorldScanner.World w = worlds.get(i);
+            items[i] = w.name + "\n" + w.sizeText()
+                    + (w.encrypted ? " · 网易加密" : " · 未加密")
+                    + (w.viaShizuku ? " · Shizuku" : "")
+                    + "\n" + w.path;
+        }
+        tvShizukuStatus.setText("找到 " + worlds.size() + " 个存档，请选择要导出的那个。");
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.world_pick_title)
+                .setItems(items, (d, which) -> {
+                    selectedWorld = worlds.get(which);
+                    NeteaseWorldScanner.World w = selectedWorld;
+                    tvShizukuStatus.setText(getString(R.string.world_selected, w.name, w.sizeText(),
+                            w.encrypted ? getString(R.string.world_enc_yes)
+                                    : getString(R.string.world_enc_no)));
+                    updateNeteaseButtons();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void updateNeteaseButtons() {
+        try {
+            MaterialButton b = findViewById(R.id.btn_world_export);
+            if (b != null) b.setEnabled(selectedWorld != null);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void exportSelectedNeteaseWorld() {
+        final NeteaseWorldScanner.World w = selectedWorld;
+        if (w == null) {
+            Toast.makeText(this, "请先扫描并选择一个存档。", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        tvShizukuStatus.setText(R.string.world_exporting);
+        updateNeteaseButtons();
+        new Thread(() -> {
+            NeteaseSaveExporter.Result r = NeteaseSaveExporter.export(this, w,
+                    (msg, ratio) -> runOnUiThread(() -> tvShizukuStatus.setText(msg)));
+            runOnUiThread(() -> onNeteaseExportDone(r));
+        }, "netease-export").start();
+    }
+
+    private void exportNeteaseFromTree(final Uri uri) {
+        tvShizukuStatus.setText(R.string.world_exporting);
+        new Thread(() -> {
+            NeteaseSaveExporter.Result r = NeteaseSaveExporter.exportFromTree(this, uri,
+                    (msg, ratio) -> runOnUiThread(() -> tvShizukuStatus.setText(msg)));
+            runOnUiThread(() -> onNeteaseExportDone(r));
+        }, "netease-export-tree").start();
+    }
+
+    private void onNeteaseExportDone(NeteaseSaveExporter.Result r) {
+        updateNeteaseButtons();
+        if (r == null) {
+            tvShizukuStatus.setText(getString(R.string.world_export_failed, "未知错误"));
+            return;
+        }
+        if (!r.success) {
+            tvShizukuStatus.setText(getString(R.string.world_export_failed, r.message));
+            return;
+        }
+        tvShizukuStatus.setText(r.message + "\n"
+                + getString(R.string.world_export_dest, r.destDir == null ? "" : r.destDir));
+        // 导出结果直接挂成"当前世界"：回到「导出」页即可马上转 OBJ
+        try {
+            if (r.destDir != null && r.destDir.startsWith("/")) {
+                File dir = new File(r.destDir);
+                if (dir.isDirectory()) {
+                    currentWorldDir = dir;
+                    etWorldDir.setText(dir.getAbsolutePath());
+                    refreshWorldInfo(dir.getAbsolutePath());
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        Toast.makeText(this, "已导出到下载目录", Toast.LENGTH_LONG).show();
+    }
+
+    /** 打开下载目录：Android 10+ 打开系统「下载」位置，旧系统直接打开该子目录。 */
+    private void openNeteaseDownloads() {
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                Intent i = new Intent(Intent.ACTION_VIEW,
+                        android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI);
+                startActivity(i);
+                return;
+            }
+        } catch (Throwable ignored) {
+        }
+        File dir = new File(android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOADS), "MinewaysMobile/网易存档");
+        openFolder(dir);
     }
 }

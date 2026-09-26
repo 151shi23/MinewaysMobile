@@ -17,8 +17,8 @@
     <string name="home_export_desc">把选中的 Minecraft 世界导出为 OBJ 三维模型（含纹理）</string>
     <string name="home_convert_title">世界格式转换</string>
     <string name="home_convert_desc">在 Java 版与基岩版之间双向转换存档，本地离线无需配置</string>
-    <string name="home_world_title">世界信息 / 导入</string>
-    <string name="home_world_desc">查看存档信息，通过 Shizuku 读取并导入基岩版私有存档，自动解密网易加密存档</string>
+    <string name="home_world_title">网易存档解密导出</string>
+    <string name="home_world_desc">通过权限（含 Shizuku 提权）找到网易版《我的世界》存档 → 自动解密 → 输出到「下载/MinewaysMobile/网易存档」，随后可直接转 OBJ</string>
     <string name="home_bb_online_title">Blockbench · 在线版</string>
     <string name="home_bb_online_desc">联网使用完整功能，可加载社区插件、主题与在线场景（需网络）</string>
     <string name="home_bb_offline_title">Blockbench · 离线版</string>
@@ -241,8 +241,24 @@
     <string name="result_hint">导出结果将显示在这里</string>
     <string name="progress_prefix">进度</string>
 
-    <string name="world_title">世界信息</string>
+    <string name="world_title">网易版存档解密导出</string>
+    <string name="world_subtitle">用权限（含 Shizuku 提权）找到网易版《我的世界》存档 → 自动解密 → 输出到「下载/MinewaysMobile/网易存档」。原存档不会被改动（解密只作用于副本）。导出完成后可直接在「导出」页转 OBJ。</string>
     <string name="not_loaded">尚未加载任何存档。请先在「导出」页选择存档目录。</string>
+    <string name="btn_world_scan">扫描网易版存档</string>
+    <string name="btn_world_scan_shizuku">Shizuku 提权扫描（被系统隔离时用）</string>
+    <string name="btn_world_pick">手动指定存档文件夹</string>
+    <string name="btn_world_export">解密并导出到下载目录</string>
+    <string name="btn_world_open_download">打开下载目录</string>
+    <string name="world_scanning">正在扫描网易版存档…（Android/data 被系统隔离时，请改用 Shizuku 提权扫描）</string>
+    <string name="world_none">未找到网易版存档。请依次尝试：① Shizuku 提权扫描；② 手动指定存档文件夹（选到含 level.dat 的那一层）。</string>
+    <string name="world_none_shizuku">Shizuku 也未找到网易版存档：请用「手动指定存档文件夹」选到含 level.dat 的那一层。</string>
+    <string name="world_pick_title">选择要导出的存档</string>
+    <string name="world_selected">已选择：%1$s（%2$s，%3$s）</string>
+    <string name="world_enc_yes">网易加密，将自动解密</string>
+    <string name="world_enc_no">未加密</string>
+    <string name="world_exporting">正在解密并导出，请稍候…</string>
+    <string name="world_export_failed">导出失败：%1$s</string>
+    <string name="world_export_dest">落点：%1$s（可直接在「导出」页转 OBJ）</string>
     <string name="btn_shizuku_import">通过 Shizuku 导入基岩版存档</string>
     <string name="shizuku_hint">权限足够时，用 Shell 复制 Minecraft 基岩版存档（/Android/data/com.mojang.minecraftpe/）到应用私有目录。</string>
     <string name="shizuku_not_installed">未检测到 Shizuku。请先安装 Shizuku 并开启其服务。</string>

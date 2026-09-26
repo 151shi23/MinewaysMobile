@@ -55,6 +55,7 @@
 | 模块 | 说明 |
 |---|---|
 | **存档导入** | 选择存档文件夹（SAF）；可用 Shizuku 直接读取 `Android/data`；自动识别并就地解密**网易**存档；**基岩版**存档可用内置 Chunker 转成 Java 版后再导出 |
+| **网易存档解密导出（独立页）** | 一页做完三件事：**① 找**——扫描网易版常见目录，三层兜底（直读 / **Shizuku 提权扫描**绕过 Android 11+ 对 `Android/data` 的隔离 / 手动指定文件夹）；**② 解密**——识别网易 XOR 加密头 `80 1D 30 01` 并推导密钥解密，**只作用于副本，绝不改动玩家原存档**；**③ 导出**——输出到 `下载/MinewaysMobile/网易存档/<世界名>/`，完成后该世界自动挂为「当前世界」，可直接转 OBJ |
 | **框选导出** | 手填 / 粘贴 `X Y Z`（支持 `X: -7 Y: -53 Z: -7`、`/tp`、全角标点、小数，自动逐轴排序）|
 | **维度** | 主世界 / 下界 / 末地 —— 建筑在哪个维度就选哪个（**选错维度会导出"另一张地图"**）|
 | **OBJ 导出** | 材质模式 5 种（不导出材质 / 实体材质颜色 / 颜色噪点纹理 / 整幅大图 / 每方块一张 PNG）、纹理 RGB·A·RGBA、单独纹理目录名、Z 轴向上、旋转 0/90/180/270、围绕原点居中 |
@@ -68,7 +69,7 @@
 | **PNG 转模型（独立界面）** | 把**纯色或全透明背景的像素图**（PNG）转成 Blockbench 立方体：前景像素 → 方块，UV 与像素一一对应，贴图内嵌；**一次导出四件套 `.bbmodel` + `.obj` + `.mtl` + `.png`**（转换器内置产物对账断言）。前景方块超过轻量预算时**自动按整数倍降采样重转**（外观不变、方块数降回预算），大图不再被拒绝。背景四角众数自动识别，容差可调（纯本地，无需联网） |
 | **bb 模型转 OBJ（独立界面）** | 调用内置的**离线 Blockbench 内核**把 `.bbmodel` 转成 **OBJ + MTL + 贴图**：不必打开编辑器界面，转换后可一键保存三件套或打包 ZIP 分享；坐标按内核的 `model_export_scale` 还原，UV 直接沿用内核结果（不二次翻转） |
 | **粒子编辑器（独立界面）** | 内置 **Snowstorm 离线版**（JannisX11，与 Blockbench 同一作者；GPL-3.0）：Minecraft 基岩版粒子效果的**可视化编辑**（时间轴、曲线、渐变、纹理/UV、事件触发、Molang）。**界面已汉化**（322 条对照表 + 11 条动态规则，只替换显示文本、不动任何逻辑值与表达式）；**导出**（Blob 下载被接管）直接写入 `下载/MinewaysMobile/粒子/`，**导入**走系统文件选择器读 `.particle.json`；全离线、无 CDN 依赖 |
-| **内置工具** | 网页版 Blockbench（离线）、PNG 转模型、bb 模型转 OBJ、粒子编辑器（Snowstorm 离线 · 汉化）、小游戏《寂零快跑》、世界信息与工具页 |
+| **内置工具** | 网页版 Blockbench（离线）、PNG 转模型、bb 模型转 OBJ、粒子编辑器（Snowstorm 离线 · 汉化）、小游戏《寂零快跑》、网易存档解密导出页、工具页 |
 
 ### 导出选项的三态：多选 / 单选 / 不选
 
@@ -281,6 +282,7 @@ tools/                            # 构建 / 审计 / 离线化脚本
 | Module | What it does |
 |---|---|
 | **World import** | Pick a save folder (SAF); optional Shizuku access to `Android/data`; automatic in-place decryption of **NetEase** saves; **Bedrock** saves can be converted to Java with the bundled Chunker |
+| **NetEase save decrypt & export (dedicated page)** | Three steps on one page: **① find** — scans the usual NetEase locations with three fallbacks (direct read / **Shizuku-elevated scan** that bypasses the Android 11+ `Android/data` isolation / manual folder pick via SAF); **② decrypt** — detects the NetEase XOR header `80 1D 30 01`, derives the key and decrypts, **working only on a copy so the player's save is never modified**; **③ export** — writes to `Download/MinewaysMobile/网易存档/<world>/` and then registers that world as the current one so it can be exported to OBJ right away |
 | **Region export** | Type or paste `X Y Z` (`X: -7 Y: -53 Z: -7`, `/tp`, full-width punctuation, decimals — auto-sorted per axis) |
 | **Dimension** | Overworld / Nether / The End — pick the one your build lives in (**a wrong dimension exports a different map**) |
 | **OBJ export** | 5 material modes (none / solid colors / swatch texture / full-sheet mosaic / one PNG per block), RGB·A·RGBA flags, tile folder name, Z-up, rotation 0/90/180/270, centering |
@@ -294,7 +296,7 @@ tools/                            # 构建 / 审计 / 离线化脚本
 | **PNG to model (dedicated screen)** | Turns a **flat-background (or fully transparent) pixel-art PNG** into Blockbench cubes: foreground pixels → cubes, UVs map to pixels, texture embedded; **one export produces all four files `.bbmodel` + `.obj` + `.mtl` + `.png`** (the converter self-checks its output). When the cube count exceeds the lightweight budget it **automatically downsamples by an integer factor and re-converts** (same look, cubes back in budget) — large images are no longer rejected. Background is auto-detected from the corner colours; tolerance is adjustable (fully local) |
 | **bbmodel to OBJ (dedicated screen)** | Drives the bundled **offline Blockbench kernel** to convert a `.bbmodel` into **OBJ + MTL + textures**: no editor UI involved; save the three files or share them as a ZIP. Vertex coordinates are restored by the kernel's `model_export_scale`, and UVs are taken from the kernel as-is (no second flip) |
 | **Particle editor (dedicated screen)** | Bundles the **offline Snowstorm** (by JannisX11, same author as Blockbench; GPL-3.0), the visual editor for Minecraft Bedrock particle effects (timeline, curves, gradients, texture/UV, event triggers, Molang). The **UI is localised to Chinese** (322-entry lookup table + 11 dynamic rules that only replace displayed text — logic values and expressions are never touched). **Export** (the Blob download path is intercepted) writes straight into `Download/MinewaysMobile/粒子/`; **import** uses the system file picker for `.particle.json`. Fully offline, no CDN |
-| **Built-ins** | Offline web Blockbench, PNG to model, bbmodel to OBJ, particle editor (offline Snowstorm, Chinese UI), the mini-game 《寂零快跑》, world-info/tools page |
+| **Built-ins** | Offline web Blockbench, PNG to model, bbmodel to OBJ, particle editor (offline Snowstorm, Chinese UI), the mini-game 《寂零快跑》, NetEase save decrypt/export page, tools page |
 
 ### Export options: multi-select / single-select / none
 
