@@ -14,6 +14,8 @@ the one shipped in the upstream project and/or in the file headers listed below.
 | 网易存档解密适配 | `app/src/main/java/com/mineways/NeteaseDecryptor.java` | 本项目 / 源码内声明 | GPL-3.0（源码头部已声明） |
 | three.js r134（OBJ 预览渲染）<br>+ OBJLoader / MTLLoader / OrbitControls | `app/src/main/assets/objviewer/lib/**` | mrdoob/three.js | MIT |
 | Blockbench（内置网页版） | `app/src/main/assets/blockbench/**` | JannisX11/blockbench | MIT |
+| Snowstorm（内置网页版，镜像自上游 master） | `app/src/main/assets/snowstorm/**` | JannisX11/snowstorm | GPL-3.0-or-later |
+| Snowstorm 汉化字典与适配脚本（本项目自研，非上游）：`zh-dict.js`（英→中对照表）、`hans.js`（注入式安全翻译 + 导出接管），另 `index.html` 相对上游增加了两个脚本标签与中文标题 | `app/src/main/assets/snowstorm/zh-dict.js`、`hans.js`、`index.html` | MinewaysMobile | GPL-3.0（与本仓库一致）|
 | lodepng（PNG 读写） | `app/src/main/cpp/core/lodepng.*` | lvandeve/lodepng | zlib |
 | region.cpp（Minecraft region 文件读取） | `app/src/main/cpp/core/region.cpp` | Ryan Hitchman（文件头保留原版权声明） | BSD-2-Clause（见文件头） |
 | 内置小游戏《寂零快跑》 | `app/src/main/assets/minigame/**` | 本项目原创 | 随本仓库 GPL-3.0 |

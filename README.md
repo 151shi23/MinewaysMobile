@@ -67,7 +67,8 @@
 | **模组转换（实验性，默认关）** | 选区内**模组方块**（非 `minecraft:` 命名空间）也一并导出：可从模组 jar / 资源包解析方块模型与贴图，追加进核心导出的同一个 OBJ —— 详见 [模组转换](#模组转换模组地图--obj) |
 | **PNG 转模型（独立界面）** | 把**纯色或全透明背景的像素图**（PNG）转成 Blockbench 立方体：前景像素 → 方块，UV 与像素一一对应，贴图内嵌；**一次导出四件套 `.bbmodel` + `.obj` + `.mtl` + `.png`**（转换器内置产物对账断言）。前景方块超过轻量预算时**自动按整数倍降采样重转**（外观不变、方块数降回预算），大图不再被拒绝。背景四角众数自动识别，容差可调（纯本地，无需联网） |
 | **bb 模型转 OBJ（独立界面）** | 调用内置的**离线 Blockbench 内核**把 `.bbmodel` 转成 **OBJ + MTL + 贴图**：不必打开编辑器界面，转换后可一键保存三件套或打包 ZIP 分享；坐标按内核的 `model_export_scale` 还原，UV 直接沿用内核结果（不二次翻转） |
-| **内置工具** | 网页版 Blockbench（离线）、PNG 转模型、bb 模型转 OBJ、小游戏《寂零快跑》、世界信息与工具页 |
+| **粒子编辑器（独立界面）** | 内置 **Snowstorm 离线版**（JannisX11，与 Blockbench 同一作者；GPL-3.0）：Minecraft 基岩版粒子效果的**可视化编辑**（时间轴、曲线、渐变、纹理/UV、事件触发、Molang）。**界面已汉化**（322 条对照表 + 11 条动态规则，只替换显示文本、不动任何逻辑值与表达式）；**导出**（Blob 下载被接管）直接写入 `下载/MinewaysMobile/粒子/`，**导入**走系统文件选择器读 `.particle.json`；全离线、无 CDN 依赖 |
+| **内置工具** | 网页版 Blockbench（离线）、PNG 转模型、bb 模型转 OBJ、粒子编辑器（Snowstorm 离线 · 汉化）、小游戏《寂零快跑》、世界信息与工具页 |
 
 ### 导出选项的三态：多选 / 单选 / 不选
 
@@ -292,7 +293,8 @@ tools/                            # 构建 / 审计 / 离线化脚本
 | **Mod conversion (experimental, off by default)** | Exports **modded blocks** (anything outside the `minecraft:` namespace) too: resolves their models and textures from mod jars / resource packs and appends them into the same OBJ the core produced — see [Mod conversion](#mod-conversion-modded-maps--obj) |
 | **PNG to model (dedicated screen)** | Turns a **flat-background (or fully transparent) pixel-art PNG** into Blockbench cubes: foreground pixels → cubes, UVs map to pixels, texture embedded; **one export produces all four files `.bbmodel` + `.obj` + `.mtl` + `.png`** (the converter self-checks its output). When the cube count exceeds the lightweight budget it **automatically downsamples by an integer factor and re-converts** (same look, cubes back in budget) — large images are no longer rejected. Background is auto-detected from the corner colours; tolerance is adjustable (fully local) |
 | **bbmodel to OBJ (dedicated screen)** | Drives the bundled **offline Blockbench kernel** to convert a `.bbmodel` into **OBJ + MTL + textures**: no editor UI involved; save the three files or share them as a ZIP. Vertex coordinates are restored by the kernel's `model_export_scale`, and UVs are taken from the kernel as-is (no second flip) |
-| **Built-ins** | Offline web Blockbench, PNG to model, bbmodel to OBJ, the mini-game 《寂零快跑》, world-info/tools page |
+| **Particle editor (dedicated screen)** | Bundles the **offline Snowstorm** (by JannisX11, same author as Blockbench; GPL-3.0), the visual editor for Minecraft Bedrock particle effects (timeline, curves, gradients, texture/UV, event triggers, Molang). The **UI is localised to Chinese** (322-entry lookup table + 11 dynamic rules that only replace displayed text — logic values and expressions are never touched). **Export** (the Blob download path is intercepted) writes straight into `Download/MinewaysMobile/粒子/`; **import** uses the system file picker for `.particle.json`. Fully offline, no CDN |
+| **Built-ins** | Offline web Blockbench, PNG to model, bbmodel to OBJ, particle editor (offline Snowstorm, Chinese UI), the mini-game 《寂零快跑》, world-info/tools page |
 
 ### Export options: multi-select / single-select / none
 

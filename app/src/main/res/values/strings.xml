@@ -172,6 +172,17 @@
     <string name="png_status_heavy">注意：%1$d 个方块偏多，用 Blockbench 打开会明显变慢甚至卡住，建议改用更小的像素图</string>
     <string name="png_status_shrunk">原图 %1$d×%2$d 超出轻量预算，已自动缩小 %3$d 倍到 %4$d×%5$d 再转换（外观不变，方块数大幅下降）</string>
     <string name="png_status_done2">转换完成：%1$d×%2$d → %3$d 个方块（bbmodel %4$d KB；保存时同时写出 .obj/.mtl/.png）</string>
+
+    <!-- 粒子编辑器（Snowstorm 离线版 · 汉化） -->
+    <string name="ss_title">粒子编辑器（Snowstorm）</string>
+    <string name="ss_status_loading">正在加载粒子编辑器（离线版 · 已汉化）…</string>
+    <string name="ss_status_ready">已就绪：编辑后点「导出」，文件会保存到「下载/MinewaysMobile/粒子」；「导入」可从同一位置选 .particle.json</string>
+    <string name="ss_pick_file">选择粒子文件（.particle.json）</string>
+    <string name="ss_saved">已保存：%1$s</string>
+    <string name="ss_save_failed">保存失败：%1$s</string>
+    <string name="ss_download_unsupported">该下载为直链形式，未能直接保存；请改用界面里的「导出」按钮</string>
+    <string name="home_snowstorm_title">粒子编辑器（Snowstorm · 汉化）</string>
+    <string name="home_snowstorm_desc">同一作者的 Minecraft 粒子编辑器离线版：界面已汉化，时间轴 / 曲线 / 渐变可视编辑；导出 .particle.json 直接进「下载/MinewaysMobile/粒子」，也能从那里导入</string>
     <string name="png_need_image">请先选择一张像素图</string>
     <string name="png_nothing">还没有可保存的产物</string>
     <string name="png_reject_jpeg">请改用 PNG：JPEG 的压缩噪点会让背景判定失真</string>

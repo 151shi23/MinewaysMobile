@@ -90,6 +90,13 @@
             android:configChanges="orientation|screenSize|uiMode|keyboard|keyboardHidden"
             android:theme="@style/Theme.MinewaysMobile" />
 
+        <!-- 粒子编辑器（Snowstorm 离线版 · 汉化；assets/snowstorm 下的静态站点 + 注入式汉化） -->
+        <activity
+            android:name=".SnowstormActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|uiMode|keyboard|keyboardHidden"
+            android:theme="@style/Theme.MinewaysMobile" />
+
         <!-- FileProvider：供“快捷工具”等访问并打开导出/转换输出目录 -->
         <provider
             android:name="androidx.core.content.FileProvider"

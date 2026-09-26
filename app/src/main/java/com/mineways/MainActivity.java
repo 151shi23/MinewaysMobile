@@ -685,6 +685,12 @@ public class MainActivity extends AppCompatActivity {
                     startActivity(new Intent(this, BbToObjActivity.class)));
         } catch (Throwable ignored) {
         }
+        // 首页独立入口：粒子编辑器（Snowstorm 离线版 · 汉化；导出进「下载/MinewaysMobile/粒子」）
+        try {
+            findViewById(R.id.card_snowstorm).setOnClickListener(v ->
+                    startActivity(new Intent(this, SnowstormActivity.class)));
+        } catch (Throwable ignored) {
+        }
         findViewById(R.id.card_tools).setOnClickListener(v -> {
             showPage(pageTools);
             refreshToolsStatus();
