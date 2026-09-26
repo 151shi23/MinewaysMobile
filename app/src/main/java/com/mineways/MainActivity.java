@@ -673,6 +673,18 @@ public class MainActivity extends AppCompatActivity {
         });
         findViewById(R.id.card_bb_online).setOnClickListener(v -> openBlockbench("online"));
         findViewById(R.id.card_bb_offline).setOnClickListener(v -> openBlockbench("offline"));
+        // 首页独立入口：PNG 转模型（纯色背景像素图 → .bbmodel）
+        try {
+            findViewById(R.id.card_png2model).setOnClickListener(v ->
+                    startActivity(new Intent(this, PngToModelActivity.class)));
+        } catch (Throwable ignored) {
+        }
+        // 首页独立入口：bb 模型转 OBJ（内置离线 Blockbench 内核做转换）
+        try {
+            findViewById(R.id.card_bb2obj).setOnClickListener(v ->
+                    startActivity(new Intent(this, BbToObjActivity.class)));
+        } catch (Throwable ignored) {
+        }
         findViewById(R.id.card_tools).setOnClickListener(v -> {
             showPage(pageTools);
             refreshToolsStatus();

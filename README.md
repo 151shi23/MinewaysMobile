@@ -65,7 +65,9 @@
 | **3D 预览（独立界面）** | 开源 **three.js** 离线渲染 OBJ，自动读同目录 MTL 与贴图；单指旋转、双指缩放，可切线框/贴图/双面/自动旋转；也能直接挑任意 `.obj` 或先看 ZIP |
 | **诊断报告** | 每次导出都生成可粘贴的报告：世界体检、选区命中、`[选区实测]`（读到的方块类型 / Y 分层 / 俯视高度图）、`[核心回执]`（核心自己记录的生效选项）、`[导出内容]`（实际写进 OBJ 的材质清单，含 glass 探测）、`[对等性自检]`（顶点包围盒 vs 核心声明尺寸：缩放比 / 是否越界 / 坐标轴方向）|
 | **模组转换（实验性，默认关）** | 选区内**模组方块**（非 `minecraft:` 命名空间）也一并导出：可从模组 jar / 资源包解析方块模型与贴图，追加进核心导出的同一个 OBJ —— 详见 [模组转换](#模组转换模组地图--obj) |
-| **内置工具** | 网页版 Blockbench（离线）、小游戏《寂零快跑》、世界信息与工具页 |
+| **PNG 转模型（独立界面）** | 把**纯色或全透明背景的像素图**（PNG）转成 Blockbench 立方体：前景像素 → 方块，UV 与像素一一对应，贴图内嵌；**一次导出四件套 `.bbmodel` + `.obj` + `.mtl` + `.png`**（转换器内置产物对账断言）。前景方块超过轻量预算时**自动按整数倍降采样重转**（外观不变、方块数降回预算），大图不再被拒绝。背景四角众数自动识别，容差可调（纯本地，无需联网） |
+| **bb 模型转 OBJ（独立界面）** | 调用内置的**离线 Blockbench 内核**把 `.bbmodel` 转成 **OBJ + MTL + 贴图**：不必打开编辑器界面，转换后可一键保存三件套或打包 ZIP 分享；坐标按内核的 `model_export_scale` 还原，UV 直接沿用内核结果（不二次翻转） |
+| **内置工具** | 网页版 Blockbench（离线）、PNG 转模型、bb 模型转 OBJ、小游戏《寂零快跑》、世界信息与工具页 |
 
 ### 导出选项的三态：多选 / 单选 / 不选
 
@@ -102,9 +104,9 @@
 
 #### 坐标为什么是对的
 
-Mineways 的**绝对坐标 OBJ** 有固定约定：**X 轴镜像**（顶点 `objX = -世界X`）、**Y/Z 与世界坐标一致**、**1 单位 = 1 方块**。模组段严格按同一条公式落地，并额外做两道校验：
+Mineways 的**绝对坐标 OBJ** 在默认设置下是**与世界坐标同向**的：顶点 `objX = 世界X`、`objY = 世界Y`、`objZ = 世界Z`，**1 单位 = 1 方块**（`ObjFileManip.cpp` 里顶点是 `(anchor - gModel.center) * scale`，未居中时 `gModel.center` 取 `gWorld2BoxOffset = 1 - 选区min`，两式相减正好等于世界坐标本身，没有任何左右翻转）。模组段严格按同一条公式落地，并额外做两道校验：
 
-- **实测标定**：用「原版方块在 OBJ 里的实际包围盒」解出镜像方向与三轴平移量，而不是硬编码常量。正常情况下偏移解出来就是 `0`（报告里的 `坐标标定：X=镜像，偏移=(0, 0, 0)`）。
+- **实测标定**：用「原版方块在 OBJ 里的实际包围盒」与「扫描器量到的世界包围盒」反解出三轴平移量，而不是硬编码常量。正常情况偏移解出来就是 `0`（报告里写 `坐标标定：与世界坐标同向（核心不做 X 镜像），偏移=(0, 0, 0)`）；核心做「居中模型」这类**纯平移**改动时也能自动跟上。
 - **跨度护栏**：把 OBJ 实测跨度与扫描器量到的原版方块跨度互相印证。两者出自同一批方块，正常必须相等；若相差超过 2.5（说明核心对模型做了**整体缩放或换轴旋转**，例如 3D 打印尺寸 / 旋转 / Z 向上），则**跳过合并并在报告里说明原因** —— 宁可不出模组段，也不把方块放歪。
 
 另外**材质按「贴图」建、逐面切换 `usemtl`**：柱、工作台这类不同面用不同贴图的方块，不会所有面都贴上第一张图。
@@ -125,12 +127,12 @@ Mineways 的**绝对坐标 OBJ** 有固定约定：**X 轴镜像**（顶点 `obj
 
 ```
 [模组转换] 选区内模组方块 3 种 / 148 个实例
-坐标标定：X=镜像，偏移=(0, 0, 0)
+坐标标定：与世界坐标同向（核心不做 X 镜像），偏移=(0, 0, 0)
 解析成功 3 种，降级 0 种（缺模型/multipart/连接性方块 → 占位色立方体）
 已合并进 OBJ/MTL（模组段独立成组，材质名前缀 mod_）
 ```
 
-- `偏移` 正常应为 `(0, 0, 0)`；`X=镜像` 是既定约定，不是错误。
+- `偏移` 正常应为 `(0, 0, 0)`；`与世界坐标同向` 是核心的默认约定，不是错误。
 - 想确认哪些方块没贴上正确贴图，就在 MTL 里查 `mod_` 开头的材质；想确认哪一段是模组几何，就在 OBJ 里查 `mod_block_` 开头的分组。
 
 ### 环境要求
@@ -217,6 +219,7 @@ app/
   src/main/assets/
       objviewer/                  # 离线 3D 预览器（three.js + OBJLoader/MTLLoader/OrbitControls）
       blockbench/                 # 内置网页版 Blockbench
+      bbengine/                   # bb 模型转 OBJ 的 WebView 转换引擎（复用上面的 Blockbench 内核）
       minigame/                   # 内置小游戏《寂零快跑》
       convert/                    # Chunker 转换所需映射资源
 chunker-core/                     # 基岩版 → Java 版世界转换（Chunker）
@@ -237,7 +240,7 @@ tools/                            # 构建 / 审计 / 离线化脚本
 **怎么确认导出的 OBJ 与存档"完全对等"（无任何不对等）？** 看报告里的 `[对等性自检]`，它用**实测**给出三个判定：
 ① **缩放比** 应为 `1.000`（即 1 单位 = 1 方块，未被 3D 打印尺寸污染）；
 ② 模型**是否超出选区**（应为"未超出"）；
-③ **坐标轴方向**（Mineways 绝对坐标 OBJ 的 X 轴是镜像的、Y/Z 与世界坐标一致 —— 这是与桌面版相同的既定约定，不是错误）。
+③ **坐标轴方向**（Mineways 绝对坐标 OBJ 与世界坐标同向，X/Y/Z 都是；核心本身不做镜像，自检只有在选区恰好对称于 `x = -0.5`、两种假设重合时才会显示"镜像"）。
 再结合 `[导出内容]`（实际写进模型的材质清单）与 `[选区实测]`（读到的方块类型 / Y 分层），即可确认"读进来 → 写出去"全链路一致。
 
 **为什么有的选项勾了看起来没变化？** 选项效果多发生在 OBJ 内部结构或几何细节上（分组、焊接、掏空…）。报告里的 `[核心回执]` 是**核心自己写的生效状态**，一眼可核对是否真的生效。
@@ -287,7 +290,9 @@ tools/                            # 构建 / 审计 / 离线化脚本
 | **3D preview (dedicated screen)** | Open-source **three.js** renders the OBJ offline and auto-loads the sibling MTL + textures; one-finger orbit, pinch zoom, wireframe / texture / double-side / autorotate toggles; you can also pick any `.obj` directly or preview a ZIP |
 | **Diagnostics report** | Every export yields a copy-pasteable report: world health check, selection hit stats, `[选区实测]` (block types read / Y bands / top-down height map), `[核心回执]` (the core's own record of effective options), `[导出内容]` (materials actually written to the OBJ, incl. a glass probe), `[对等性自检]` (vertex bounding box vs the core's declared size: scale ratio / out-of-selection / axis orientation) |
 | **Mod conversion (experimental, off by default)** | Exports **modded blocks** (anything outside the `minecraft:` namespace) too: resolves their models and textures from mod jars / resource packs and appends them into the same OBJ the core produced — see [Mod conversion](#mod-conversion-modded-maps--obj) |
-| **Built-ins** | Offline web Blockbench, the mini-game 《寂零快跑》, world-info/tools page |
+| **PNG to model (dedicated screen)** | Turns a **flat-background (or fully transparent) pixel-art PNG** into Blockbench cubes: foreground pixels → cubes, UVs map to pixels, texture embedded; **one export produces all four files `.bbmodel` + `.obj` + `.mtl` + `.png`** (the converter self-checks its output). When the cube count exceeds the lightweight budget it **automatically downsamples by an integer factor and re-converts** (same look, cubes back in budget) — large images are no longer rejected. Background is auto-detected from the corner colours; tolerance is adjustable (fully local) |
+| **bbmodel to OBJ (dedicated screen)** | Drives the bundled **offline Blockbench kernel** to convert a `.bbmodel` into **OBJ + MTL + textures**: no editor UI involved; save the three files or share them as a ZIP. Vertex coordinates are restored by the kernel's `model_export_scale`, and UVs are taken from the kernel as-is (no second flip) |
+| **Built-ins** | Offline web Blockbench, PNG to model, bbmodel to OBJ, the mini-game 《寂零快跑》, world-info/tools page |
 
 ### Export options: multi-select / single-select / none
 
@@ -324,9 +329,9 @@ The **Export options** panel (button on the export page, or long-press *Start ex
 
 #### Why the coordinates are right
 
-An **absolute-coordinate Mineways OBJ** follows a fixed convention: the **X axis is mirrored** (vertex `objX = -worldX`), **Y/Z match world coordinates**, and **1 unit = 1 block**. The modded geometry uses exactly the same formula, plus two extra checks:
+An **absolute-coordinate Mineways OBJ** is **axis-aligned with world coordinates** under the default settings: vertex `objX = worldX`, `objY = worldY`, `objZ = worldZ`, and **1 unit = 1 block** (in `ObjFileManip.cpp` a vertex is `(anchor - gModel.center) * scale`; when not centered, `gModel.center` is `gWorld2BoxOffset = 1 - selection min`, so the subtraction yields the world coordinate itself — there is no left/right flip). The modded geometry uses exactly the same formula, plus two extra checks:
 
-- **Measured calibration**: the mirror direction and the three-axis translation are solved from the vanilla blocks' *actual* bounding box in the OBJ, not hard-coded. In the normal case the offset solves to `0` (report line `坐标标定：X=镜像，偏移=(0, 0, 0)`).
+- **Measured calibration**: the three-axis translation is solved from the vanilla blocks' *actual* bounding box in the OBJ together with the world bounding box the scanner measured, not hard-coded. In the normal case the offset solves to `0` (report line `坐标标定：与世界坐标同向（核心不做 X 镜像），偏移=(0, 0, 0)`); pure-translation core options such as "center model" are followed automatically.
 - **Span guard**: the OBJ's measured span is cross-checked against the vanilla span the scanner measured. Both come from the same blocks, so they must match; if they differ by more than 2.5 (meaning the core **scaled or re-oriented the whole model** — 3D-print sizing, rotation, Z-up…), the merge is **skipped with an explanation in the report** — better no modded geometry than blocks placed wrongly.
 
 Materials are also created **per texture, switching `usemtl` face by face**, so pillars, crafting tables and other multi-texture blocks don't end up with the first texture on every face.
@@ -347,12 +352,12 @@ If the selection contains **no vanilla blocks at all** (a purely modded build), 
 
 ```
 [模组转换] 选区内模组方块 3 种 / 148 个实例
-坐标标定：X=镜像，偏移=(0, 0, 0)
+坐标标定：与世界坐标同向（核心不做 X 镜像），偏移=(0, 0, 0)
 解析成功 3 种，降级 0 种（缺模型/multipart/连接性方块 → 占位色立方体）
 已合并进 OBJ/MTL（模组段独立成组，材质名前缀 mod_）
 ```
 
-- The `偏移` (offset) should normally be `(0, 0, 0)`; `X=镜像` (mirrored) is the established convention, not a bug.
+- The `偏移` (offset) should normally be `(0, 0, 0)`; `与世界坐标同向` (axis-aligned with world coordinates) is the core's default convention, not a bug.
 - To find textures that failed, search the MTL for materials starting with `mod_`; to find which geometry is modded, search the OBJ for `mod_block_` groups.
 
 ### Requirements
@@ -439,7 +444,7 @@ tools/                              # Build / audit / offline-asset scripts
 **How do I confirm the exported OBJ matches the save exactly (no discrepancy)?** Read `[对等性自检]` in the report — it *measures* three things:
 ① the **scale ratio**, which must be `1.000` (1 unit = 1 block, unaffected by 3D-print sizing);
 ② whether the model **stays inside the selection** (it should);
-③ the **axis orientation** (an absolute-coordinate Mineways OBJ mirrors the X axis while Y/Z match world coordinates — that is the established desktop-version convention, not a bug).
+③ the **axis orientation** (an absolute-coordinate Mineways OBJ is axis-aligned with world coordinates, X/Y/Z — the diagnostic only flags a *mirror* when the selection happens to be symmetric about `x = -0.5`, in which case both hypotheses coincide; the core itself never mirrors).
 Together with `[导出内容]` (what was actually written) and `[选区实测]` (what was read), this verifies the whole "read → write" chain.
 
 **Why do some options look like they do nothing?** Most options affect OBJ internals or geometry details (grouping, welding, hollowing…). The `[核心回执]` section of the report is the **core's own record** of what actually took effect — check it there.

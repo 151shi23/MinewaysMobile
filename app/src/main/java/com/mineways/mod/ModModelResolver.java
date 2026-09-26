@@ -22,7 +22,9 @@ public final class ModModelResolver {
 
     public static final class Quad {
         public float[] p = new float[12];
-        public float[] uv = {0, 1, 1, 1, 1, 0, 0, 0};
+        // 与 faces() 的顶点顺序一一对应：左下 → 右下 → 右上 → 左上（整张贴图）。
+        // generic() 里模型自带 uv 时会被同口径的值覆盖，两者必须上下一致，否则没写 uv 的面会上下颠倒。
+        public float[] uv = {0, 0, 1, 0, 1, 1, 0, 1};
         public String tex;
     }
 
@@ -35,7 +37,11 @@ public final class ModModelResolver {
     public static final class Idx {
         public final Map<String, String> models = new HashMap<>();
         public final Map<String, String> states = new HashMap<>();
+        /** 贴图引用（ns:block/foo.png）→ 压缩包里的条目名。 */
         public final Map<String, String> texEntry = new HashMap<>();
+        /** 条目名 → 它所在的压缩包。取贴图字节时直接开这一个包，不必逐个包扫。 */
+        public final Map<String, Uri> texUri = new HashMap<>();
+        /** 打开过的压缩包（取字节时的兜底扫描用）。 */
         public final List<Uri> uriList = new ArrayList<>();
         public int jars;
     }
@@ -45,6 +51,10 @@ public final class ModModelResolver {
     public static Idx index(Context ctx, List<Uri> uris) {
         Idx idx = new Idx();
         for (Uri u : uris) {
+            if (u == null) continue;
+            // 必须先登记来源 Uri：贴图是「按条目名记录、之后再去包里取字节」的，
+            // 少了这一步 texEntry 里的条目名永远取不到内容，模组方块会全部退回占位色。
+            idx.uriList.add(u);
             try (InputStream in = ctx.getContentResolver().openInputStream(u);
                  ZipInputStream z = new ZipInputStream(new BufferedInputStream(in))) {
                 idx.jars++;
@@ -59,11 +69,15 @@ public final class ModModelResolver {
                     String ns = rest.substring(0, si);
                     String rel = rest.substring(si + 1);
                     if (rel.startsWith("models/block/") && rel.endsWith(".json")) {
-                        idx.models.put(ns + ":" + rel.substring(13, rel.length() - 5), readString(z));
+                        // 键要保留 "block/" 这一级：blockstate 里引用的是 "ns:block/xxx"。
+                        // 少这一级（原来取 rel.substring(13)）会让键变成 "ns:xxx"，与引用对不上，
+                        // 模型永远查不到 → 整个模组方块都退化成占位色立方体。
+                        idx.models.put(ns + ":" + rel.substring("models/".length(), rel.length() - 5), readString(z));
                     } else if (rel.startsWith("blockstates/") && rel.endsWith(".json")) {
                         idx.states.put(ns + ":" + rel.substring(12, rel.length() - 5), readString(z));
                     } else if (rel.startsWith("textures/") && rel.endsWith(".png")) {
                         idx.texEntry.put(ns + ":" + rel.substring(9), n);
+                        idx.texUri.put(n, u);
                     }
                 }
             } catch (Throwable ignored) { }
@@ -88,7 +102,8 @@ public final class ModModelResolver {
             Map<String, String> pv = parseProps(props);
             String modelPath = strip(name);
             int rx = 0, ry = 0;
-            String bsJson = idx.states.get(strip(name));
+            String bsJson = idx.states.get(name);
+            if (bsJson == null) bsJson = idx.states.get(strip(name));
             if (bsJson != null) {
                 JSONObject bs = new JSONObject(bsJson);
                 JSONObject variants = bs.optJSONObject("variants");
@@ -103,12 +118,17 @@ public final class ModModelResolver {
                             v = arr == null ? null : arr.optJSONObject(0);
                         }
                         if (v == null) continue;
+                        // 变体语义与 MC 一致：键里列出的属性必须**全部**命中才算这个变体，
+                        // 命中数多的更具体、优先。只统计命中数会让 facing=north 这种「只对上一条」
+                        // 的变体压过真正的默认变体，模型就选错了。
                         int score = 0;
-                        if (!k.isEmpty() && pv != null) {
-                            for (String pair : k.split(",")) {
-                                String[] kv = pair.split("=", 2);
-                                if (kv.length == 2 && kv[1].equals(pv.get(kv[0].trim()))) score++;
-                            }
+                        for (String pair : k.split(",")) {
+                            if (pair.isEmpty()) continue;
+                            String[] kv = pair.split("=", 2);
+                            if (kv.length != 2) continue;
+                            String want = pv.get(kv[0].trim());
+                            if (want == null || !want.equals(kv[1].trim())) { score = -1; break; }
+                            score++;
                         }
                         if (score > bestScore) {
                             bestScore = score;
@@ -161,24 +181,36 @@ public final class ModModelResolver {
         return rd;
     }
 
-    private static String t(Map<String, String> tex, String key) {
-        String v = tex.get(key);
+    /**
+     * 解析贴图引用 → 真正的贴图路径。
+     * 两种写法都要吃得下：模型自带 faces 里写的是「#变量名」（generic 直接原样传进来），
+     * 而 cube/cube_all 这些内置父模型是按「变量名」取的；tex 的值本身也可能是「#另一个变量」，
+     * 所以要沿别名链一直走到具体路径。
+     */
+    private static String t(Map<String, String> tex, String ref) {
+        if (ref == null) return null;
+        String v = ref.startsWith("#") ? tex.get(ref.substring(1)) : tex.get(ref);
         int g = 0;
         while (v != null && v.startsWith("#") && g++ < 8) v = tex.get(v.substring(1));
         return v;
     }
 
+    /** 没有 all/side 这类约定键时的兜底：取第一个能落到具体路径的贴图值。 */
     private static String firstTex(Map<String, String> tex) {
         for (String v : tex.values()) {
-            String r = t(tex, v == null ? "" : v);
+            String r = v != null && v.startsWith("#") ? t(tex, v) : v;
             if (r != null && !r.isEmpty()) return r;
         }
         return null;
     }
 
+    /**
+     * 读模型并按 MC 的规则合并父链：贴图子覆盖父（父链上的只补自己没有的键）；
+     * elements 是整体继承的 —— 自己没写就用父链上第一个写了 elements 的模型，一并返回。
+     */
     private static JSONObject load(String path, Idx idx, Map<String, String> tex, int depth) {
         if (depth > 8 || path == null || path.isEmpty()) return null;
-        String json = idx.models.get(strip(path));
+        String json = getModel(idx, path);
         if (json == null) return null;
         try {
             JSONObject m = new JSONObject(json);
@@ -191,9 +223,20 @@ public final class ModModelResolver {
                 }
             }
             String parent = m.optString("parent", "");
-            if (!parent.isEmpty()) load(parent, idx, tex, depth + 1);
+            JSONObject p = parent.isEmpty() ? null : load(parent, idx, tex, depth + 1);
+            if (m.optJSONArray("elements") == null && p != null && p.optJSONArray("elements") != null)
+                return p;
             return m;
         } catch (Throwable ignored) { return null; }
+    }
+
+    /** 模型查找：原样 → 去掉 minecraft: 前缀 → 补上 minecraft:（父链里两种写法都常见）。 */
+    private static String getModel(Idx idx, String path) {
+        if (path == null || path.isEmpty()) return null;
+        String json = idx.models.get(path);
+        if (json == null) json = idx.models.get(strip(path));
+        if (json == null && !path.contains(":")) json = idx.models.get("minecraft:" + path);
+        return json;
     }
 
     private static void cube(Resolved rd, String n, String s, String e, String w, String u, String d) {
@@ -266,13 +309,17 @@ public final class ModModelResolver {
     }
 
     private static float[][] faces() {
+        // 每个面四个顶点，顺序统一为「从方块的外面看：贴图左下 → 右下 → 右上 → 左上」。
+        // 这个顺序同时决定两件事，不能随手写：
+        //   ① 环绕方向（右手定则的法线必须朝外，否则整个模组方块会被渲染成内外翻转）；
+        //   ② 贴图方向（u 向右、v 向下，与下面 generic() 里显式 uv 的算法同源）。
         return new float[][]{
-            {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0},
-            {1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1},
-            {1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0},
-            {0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1},
-            {0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1},
-            {0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0}
+            {1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0},  // north (-Z)
+            {0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1},  // south (+Z)
+            {1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1},  // east (+X)
+            {0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0},  // west (-X)
+            {0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0},  // up (+Y)
+            {0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1}   // down (-Y)
         };
     }
 

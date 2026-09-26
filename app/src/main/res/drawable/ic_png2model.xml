@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <!-- 像素方块：五点像素图案，代表“逐像素转立方体” -->
+    <path android:fillColor="#FF000000"
+        android:pathData="M2,2h6v6h-6z M16,2h6v6h-6z M9,9h6v6h-6z M2,16h6v6h-6z M16,16h6v6h-6z" />
+</vector>

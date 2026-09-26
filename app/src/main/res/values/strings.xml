@@ -2,7 +2,7 @@
 <resources>
     <string name="app_name">Mineways Mobile</string>
     <!-- 防泄密水印文案：平铺在原生界面底层（见 WatermarkView） -->
-    <string name="app_watermark">烬火社区-123出品</string>
+    <string name="app_watermark">烬火社-123出品\n寂零策划</string>
     <string name="tab_home">首页</string>
     <string name="tab_world">世界</string>
     <string name="tab_about">关于</string>
@@ -151,6 +151,69 @@
     <string name="ai_save_failed">保存失败：%1$s</string>
     <string name="home_ai_title">AI 动画助手（独立界面）</string>
     <string name="home_ai_desc">描述动画逻辑，AI 生成 Blockbench 动画 JSON / Snowstorm 粒子 JSON / Molang 表达式；自配 API Key，仅存本机</string>
+
+    <!-- PNG 转模型（独立界面：纯色背景像素图 → .bbmodel） -->
+    <string name="home_png2model_title">PNG 转模型</string>
+    <string name="home_png2model_desc">纯色背景的像素图转成 Blockbench 立方体（同色相邻像素自动合并，方块数可控），导出可直接编辑的 .bbmodel</string>
+    <string name="png_title">PNG 转模型</string>
+    <string name="png_hint">选一张纯色背景的像素图（PNG）：前景像素会转成立方体，同色相邻像素自动合并（避免方块过多导致 Blockbench 打开卡死）；UV 与像素一一对应，贴图原样内嵌，转换后是自包含的 .bbmodel。</string>
+    <string name="png_preview_desc">像素图预览</string>
+    <string name="png_pick">选择像素图（PNG）</string>
+    <string name="png_params_label">转换参数</string>
+    <string name="png_name_hint">模型名（同时作为贴图与文件名）</string>
+    <string name="png_tol_hint">背景容差（默认 12）</string>
+    <string name="png_sharpen">锐化轮廓（剔除抗锯齿的混色像素）</string>
+    <string name="png_convert">开始转换</string>
+    <string name="png_status_idle">尚未选择图片</string>
+    <string name="png_status_loaded">已载入 %1$d×%2$d，点「开始转换」</string>
+    <string name="png_status_working">正在转换…</string>
+    <string name="png_status_done">完成：%1$d×%2$d，前景 %3$d 像素 → %4$d 个方块（同色已合并）；背景 %5$s，透明 %6$d 像素；产物约 %7$dKB</string>
+    <string name="png_status_failed">转换失败：%1$s</string>
+    <string name="png_status_heavy">注意：%1$d 个方块偏多，用 Blockbench 打开会明显变慢甚至卡住，建议改用更小的像素图</string>
+    <string name="png_status_shrunk">原图 %1$d×%2$d 超出轻量预算，已自动缩小 %3$d 倍到 %4$d×%5$d 再转换（外观不变，方块数大幅下降）</string>
+    <string name="png_status_done2">转换完成：%1$d×%2$d → %3$d 个方块（bbmodel %4$d KB；保存时同时写出 .obj/.mtl/.png）</string>
+    <string name="png_need_image">请先选择一张像素图</string>
+    <string name="png_nothing">还没有可保存的产物</string>
+    <string name="png_reject_jpeg">请改用 PNG：JPEG 的压缩噪点会让背景判定失真</string>
+    <string name="png_decode_failed">图片解码失败，可能不是有效的图片</string>
+    <string name="png_too_large">图片超过 %1$d×%1$d 上限，像素图不需要这么大</string>
+    <string name="png_encode_failed">内嵌贴图编码失败</string>
+    <string name="png_save">保存到下载</string>
+    <string name="png_share">分享 .bbmodel</string>
+    <string name="png_saved_public">已保存到 下载/MinewaysMobile/png转模型/%1$s</string>
+    <string name="png_saved_private">已保存到应用目录：%1$s</string>
+    <string name="png_save_failed">保存失败：%1$s</string>
+
+    <!-- bb 模型转 OBJ（独立界面：离线 Blockbench 内核当转换引擎） -->
+    <string name="home_bb2obj_title">bb 模型转 OBJ</string>
+    <string name="home_bb2obj_desc">调用内置的离线 Blockbench 内核，把 .bbmodel 转成 OBJ + MTL + 贴图（支持含网格的模型）</string>
+    <string name="bb2obj_title">bb 模型转 OBJ</string>
+    <string name="bb2obj_hint">选择一个 .bbmodel：由内置的离线 Blockbench 内核在本机转换，输出 .obj、.mtl 与全部贴图。全程离线，内核界面无需你操作。</string>
+    <string name="bb2obj_pick">选择 .bbmodel 文件</string>
+    <string name="bb2obj_no_file">尚未选择文件</string>
+    <string name="bb2obj_file">已选择：%1$s（约 %2$dKB）</string>
+    <string name="bb2obj_scale16">按像素单位输出（顶点 ×16，推荐）</string>
+    <string name="bb2obj_convert">开始转换</string>
+    <string name="bb2obj_status_init">正在启动内置内核…</string>
+    <string name="bb2obj_status_kernel">正在等待 Blockbench 内核就绪…</string>
+    <string name="bb2obj_status_ready">内核已就绪（Blockbench %1$s，内部缩放 1/%2$d）</string>
+    <string name="bb2obj_status_kernel_failed">内核启动失败：%1$s</string>
+    <string name="bb2obj_status_timeout">引擎响应超时（%1$s）</string>
+    <string name="bb2obj_status_reading">正在读取文件…</string>
+    <string name="bb2obj_status_picked">文件已就绪，点「开始转换」</string>
+    <string name="bb2obj_status_uploading">正在把模型送进内核…</string>
+    <string name="bb2obj_status_compiling">正在编译 OBJ…</string>
+    <string name="bb2obj_status_pulling">正在取回产物…</string>
+    <string name="bb2obj_status_pulling_file">取回 %1$s（约 %2$dKB）…</string>
+    <string name="bb2obj_status_done">完成：%1$s → OBJ %2$dKB（顶点 ×%3$d），v %4$d、f %5$d、usemtl %6$d，贴图 %7$d 张</string>
+    <string name="bb2obj_status_failed">转换失败：%1$s</string>
+    <string name="bb2obj_not_bbmodel">%1$s 不是 Blockbench 项目文件（缺少 meta 字段）</string>
+    <string name="bb2obj_need_file">请先选择 .bbmodel 文件</string>
+    <string name="bb2obj_nothing">还没有可保存的产物</string>
+    <string name="bb2obj_save">保存到下载</string>
+    <string name="bb2obj_share">打包分享</string>
+    <string name="bb2obj_saved_all">已保存 %1$d 个文件到 %2$s</string>
+    <string name="bb2obj_saved_part">已保存 %1$d 个文件，%2$d 个失败</string>
 
     <!-- 首次启动引导窗 -->
     <string name="intro_title">欢迎使用 Mineways Mobile</string>

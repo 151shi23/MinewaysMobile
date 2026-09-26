@@ -23,7 +23,8 @@ import java.util.zip.ZipInputStream;
 
 /**
  * 模组支持·输出：把解析出的模组网格**以追加方式**合并进已导出的 OBJ/MTL。
- * 坐标映射不用猜：用「扫描到的原版方块世界包围盒」与「OBJ 实测顶点包围盒」解出逐轴（镜像+平移）映射。
+ * 坐标映射不用猜：用「扫描到的原版方块世界包围盒」与「OBJ 实测顶点包围盒」解出逐轴平移量
+ * （核心默认与世界坐标同向，没有镜像，见 solveMap 注释）。
  * 全程追加式（先写临时文件再拼接），失败时原版导出结果不受影响。
  */
 public final class ModOutput {
@@ -79,14 +80,14 @@ public final class ModOutput {
                     r.report += join(scan.notes);
                     return r;
                 }
-                rep.append("坐标标定：X=").append(map[0] != 0 ? "镜像" : "同向")
-                   .append("，偏移=(").append(f3(map[1])).append(", ").append(f3(map[2]))
-                   .append(", ").append(f3(map[3])).append(")\n");
+                rep.append("坐标标定：与世界坐标同向（核心不做 X 镜像），偏移=(")
+                   .append(f3(map[0])).append(", ").append(f3(map[1]))
+                   .append(", ").append(f3(map[2])).append(")\n");
             } else {
-                // 选区内没有原版方块可标定（纯模组地图就是这种情况）：直接按 Mineways 绝对坐标 OBJ 的
-                // 一贯约定落地 —— X 轴镜像、1 单位 = 1 方块、Y/Z 与世界一致，不叠加任何偏移。
-                map = new double[]{1, 0, 0, 0};
-                rep.append("坐标标定：选区内没有原版方块可比对，按 Mineways 默认约定输出（X 镜像、零偏移）\n");
+                // 选区内没有原版方块可标定（纯模组地图就是这种情况）：核心的默认约定就是
+                // obj = 世界坐标（1 单位 = 1 方块、不镜像），模组段用同一套坐标落地，不叠加任何偏移。
+                map = new double[]{0, 0, 0};
+                rep.append("坐标标定：选区内没有原版方块可比对，按核心默认约定输出（与世界坐标同向、零偏移）\n");
             }
 
             if (!texDir.isDirectory()) texDir.mkdirs();
@@ -147,18 +148,23 @@ public final class ModOutput {
     }
 
     /**
-     * 解出 obj = f(world)：[mirrorX, offX, offY, offZ]。
+     * 解出逐轴平移量 {offX, offY, offZ}：objX = 世界X + offX（Y/Z 同理）。
      *
-     * 镜像分支与 emitQuad 必须严格同源：objX = -worldX + offX。
-     * offX 直接由「OBJ 实测最小 x」反推，不假设核心的绝对常量——
-     * 因为 export_diag 的自检就是按 objX = -worldX（X 轴镜像，mnx = -(selMaxX+1)）这条经验约定判定方向的。
+     * 只解平移，不判镜像。核心在默认配置下顶点是原样输出的：
+     *   ObjFileManip.cpp 里顶点 = (anchor[X] - gModel.center[X]) * scale * unitsScale，
+     *   未居中时 gModel.center = gWorld2BoxOffset，而 gWorld2BoxOffset[X] = 1 - 选区minX
+     *   （Y/Z 同号，见 initializeWorldData），anchor[X] 又是「世界X + gWorld2BoxOffset[X]」，
+     *   两者相减正好等于世界 X —— 即 objX 就是世界 X，没有任何左右翻转。
+     * 「X 轴镜像」出自 export_diag 的方向自检文案，而那条自检在同向与镜像两组判据上
+     * 用的是同一对比较（选区对称于 x=-0.5 时两组同时成立），并且先判镜像，于是报出镜像 ——
+     * 那是误报。旧代码照它写死镜像，选区 X 跨度靠近原点时会把整片模组方块挪出去半个跨度。
+     *
+     * 偏移量用「OBJ 实测最小顶点 − 扫描到的原版方块最小坐标」现场量，不写死常量，
+     * 这样核心做纯平移类的改动（如「居中模型」）也能自动跟上；
+     * 缩放 / 换轴旋转则由调用方的跨度护栏拦下。
      */
     private static double[] solveMap(double[] objB, ModBlockScanner.Result scan) {
-        double wx0 = scan.vminX, wy0 = scan.vminY, wz0 = scan.vminZ;
-        double wx1 = scan.vmaxX + 1, wy1 = scan.vmaxY + 1, wz1 = scan.vmaxZ + 1;
-        boolean mirrorX = Math.abs(objB[0] - (-(wx1))) < 2.0 || Math.abs(objB[3] - (-(wx0))) < 2.0;
-        double offX = mirrorX ? objB[0] + wx1 : objB[0] - wx0;
-        return new double[]{mirrorX ? 1 : 0, offX, objB[1] - wy0, objB[2] - wz0};
+        return new double[]{objB[0] - scan.vminX, objB[1] - scan.vminY, objB[2] - scan.vminZ};
     }
 
     private static double[] objBBox(File objFile) {
@@ -192,11 +198,10 @@ public final class ModOutput {
     private static String emitQuad(ModModelResolver.Quad q, int wx, int wy, int wz,
                                    double[] map, long vBase, long tBase) {
         StringBuilder sb = new StringBuilder();
-        boolean mirror = map[0] != 0;
         for (int i = 0; i < 12; i += 3) {
-            double ox = q.p[i] + wx, oy = q.p[i + 1] + wy, oz = q.p[i + 2] + wz;
-            double x = mirror ? -ox + map[1] : ox + map[1];
-            sb.append("v ").append(f3(x)).append(' ').append(f3(oy + map[2])).append(' ').append(f3(oz + map[3])).append('\n');
+            sb.append("v ").append(f3(q.p[i] + wx + map[0]))
+              .append(' ').append(f3(q.p[i + 1] + wy + map[1]))
+              .append(' ').append(f3(q.p[i + 2] + wz + map[2])).append('\n');
         }
         for (int i = 0; i < 8; i += 2) sb.append("vt ").append(f3(q.uv[i])).append(' ').append(f3(q.uv[i + 1])).append('\n');
         sb.append("f ");
@@ -347,21 +352,35 @@ public final class ModOutput {
     }
 
     private static byte[] readEntry(Context ctx, ModModelResolver.Idx idx, String entry) {
-        for (Uri u : idx.uriList) {
-            try (InputStream in = ctx.getContentResolver().openInputStream(u);
-                 ZipInputStream z = new ZipInputStream(new java.io.BufferedInputStream(in))) {
-                ZipEntry e;
-                while ((e = z.getNextEntry()) != null) {
-                    if (entry.equals(e.getName())) {
-                        ByteArrayOutputStream o = new ByteArrayOutputStream();
-                        byte[] b = new byte[8192];
-                        int n;
-                        while ((n = z.read(b)) > 0) o.write(b, 0, n);
-                        return o.toByteArray();
-                    }
-                }
-            } catch (Throwable ignored) { }
+        // 索引里记了这张贴图出自哪个包，就直接开那一个，省掉把每个包从头扫一遍；
+        // 万一没记录（条目名对不上等），再退回遍历所有包。
+        Uri known = idx.texUri.get(entry);
+        if (known != null) {
+            byte[] b = readFromZip(ctx, known, entry);
+            if (b != null) return b;
         }
+        for (Uri u : idx.uriList) {
+            if (u == null || u.equals(known)) continue;
+            byte[] b = readFromZip(ctx, u, entry);
+            if (b != null) return b;
+        }
+        return null;
+    }
+
+    private static byte[] readFromZip(Context ctx, Uri uri, String entry) {
+        try (InputStream in = ctx.getContentResolver().openInputStream(uri);
+             ZipInputStream z = new ZipInputStream(new java.io.BufferedInputStream(in))) {
+            ZipEntry e;
+            while ((e = z.getNextEntry()) != null) {
+                if (entry.equals(e.getName())) {
+                    ByteArrayOutputStream o = new ByteArrayOutputStream();
+                    byte[] b = new byte[8192];
+                    int n;
+                    while ((n = z.read(b)) > 0) o.write(b, 0, n);
+                    return o.toByteArray();
+                }
+            }
+        } catch (Throwable ignored) { }
         return null;
     }
 }

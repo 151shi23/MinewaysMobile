@@ -58,6 +58,22 @@
             android:configChanges="orientation|screenSize|uiMode|keyboard|keyboardHidden"
             android:theme="@style/Theme.MinewaysMobile" />
 
+        <!-- PNG 转模型：纯色背景像素图逐像素转成 Blockbench 立方体，导出 .bbmodel（纯本地） -->
+        <activity
+            android:name=".PngToModelActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|uiMode|keyboard|keyboardHidden"
+            android:theme="@style/Theme.MinewaysMobile" />
+
+        <!-- bb 模型转 OBJ：WebView 载入 assets 内置离线 Blockbench 内核做 headless 转换 -->
+        <activity
+            android:name=".BbToObjActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|uiMode|keyboard|keyboardHidden"
+            android:theme="@style/Theme.MinewaysMobile" />
+
         <!-- AI 动画助手：自然语言 → 基岩版动画/粒子 JSON 与 Molang（用户自配 OpenAI 兼容 API） -->
         <activity
             android:name=".AiAnimActivity"
