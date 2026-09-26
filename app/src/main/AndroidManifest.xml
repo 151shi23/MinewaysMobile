@@ -23,6 +23,8 @@
     <application
         android:name=".MinewaysApp"
         android:label="Mineways Mobile"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.MinewaysMobile"
         android:hardwareAccelerated="true"
         android:largeHeap="true"
