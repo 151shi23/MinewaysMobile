@@ -254,6 +254,9 @@ extern UnitType gUnitTypeTable[];
 
 // export MDL or not for USD (affects custom material display, too)
 #define EXPT_EXPORT_MDL                         0x08000000
+// 适配 Prisma3D（P3D）：只改导出材质参数，不动几何。参照 Prisma3D 2.0.8 自带的 OBJ 材质模板
+// （illum 4 / Ka 0 0 0 / Kd 1 1 1 / 无 map_Ka / 无自发光 Ke），避免导入 P3D 后过曝。
+#define EXPT_ADAPT_P3D                          0x10000000
 
 // string length for export dialog, etc.
 #define EP_FIELD_LENGTH 20

@@ -27125,6 +27125,10 @@ static int writeOBJFullMtlDescription(char* mtlName, int type, int dataVal, char
         strcpy_s(fullMtl, 256, "# ");
     }
 
+    // P3D（Prisma3D）适配开关：只改材质参数，不动任何几何。参照 Prisma3D 2.0.8 自带的 OBJ 材质模板
+    // （illum 4 / Ka 0 0 0 / Kd 1 1 1 / 无 map_Ka / 无自发光 Ke），避免导入 P3D 后环境光与自发光叠加导致过曝。
+    const bool adaptP3D = (gModel.options->exportFlags & EXPT_ADAPT_P3D) != 0;
+
     // if we want a neutral material, set to white
     // was: if (gModel.options->exportFlags & EXPT_OUTPUT_OBJ_NEUTRAL_MATERIAL)
     // In fact, texture should be multiplied by color, according to the spec: http://paulbourke.net/dataformats/mtl/
@@ -27335,7 +27339,7 @@ static int writeOBJFullMtlDescription(char* mtlName, int type, int dataVal, char
     mapKeString[0] = '\0';
     // if emission is on, but no emitter-specific map_Ke was found above, use the color map for the texture
     // (this looks better in g3d anyway)
-    if ((gBlockDefinitions[type].flags & BLF_EMITTER) && !foundMapKe && !gModel.print3D )
+    if ((gBlockDefinitions[type].flags & BLF_EMITTER) && !foundMapKe && !gModel.print3D && !adaptP3D )
     {
         bool subtypeMaterial = ((gModel.options->exportFlags & EXPT_OUTPUT_OBJ_SPLIT_BY_BLOCK_TYPE) != 0x0);
 
@@ -27371,6 +27375,21 @@ static int writeOBJFullMtlDescription(char* mtlName, int type, int dataVal, char
         ks = 0.03;
     }
 
+    // P3D 适配：Ka 归零（不叠环境光）、去掉高光（2.0.8 模板里也没有 Ks/Ns），只保留 Kd 贴图漫反射
+    if (adaptP3D) {
+        ka = 0.0f;
+        ks = 0.0f;
+    }
+
+    // P3D 适配：不写 map_Ka。环境贴图会让 P3D 把环境光再叠一遍 → 过曝
+    // （本项目内置的 OBJ 预览器也早因同类问题在加载时删掉过 map_Ka）。
+    char mapKaString[512];
+    if (adaptP3D) {
+        mapKaString[0] = '\0';
+    } else {
+        sprintf_s(mapKaString, 512, "%smap_Ka %s\n", fullMtl, typeTextureFileName);
+    }
+
     if (gModel.exportTexture)
     {
         sprintf_s(outputString, 2048,
@@ -27380,7 +27399,7 @@ static int writeOBJFullMtlDescription(char* mtlName, int type, int dataVal, char
             "Kd %g %g %g\n"
             "Ks %g %g %g\n"
             "%s" // emissive
-            "%smap_Ka %s\n"
+            "%s"    // map_Ka（P3D 适配时为空串，见 mapKaString）
             "%s"    // custom material settings
             "map_Kd %s\n"
             "%s" // map_d, if there's a cutout - for dissolve. Usually not needed. See http://paulbourke.net/dataformats/mtl/
@@ -27399,12 +27418,12 @@ static int writeOBJFullMtlDescription(char* mtlName, int type, int dataVal, char
             (float)(fRed * kd), (float)(fGreen * kd), (float)(fBlue * kd),
             (float)(fRed * ks), (float)(fGreen * ks), (float)(fBlue * ks),
             keString,
-            fullMtl, typeTextureFileName,
+            mapKaString,
             customMaterialString,
             typeTextureFileName,
             mapdString,
             mapKeString,
-            fullMtl, (alpha < 1.0f ? 4 : 2), // ray trace if transparent overall, e.g. water
+            fullMtl, ((alpha < 1.0f || adaptP3D) ? 4 : 2), // 透明或 P3D 适配时用 illum 4（2.0.8 模板即 4）
             (float)(alpha),
             (float)(1.0f - alpha),
             tfString,
@@ -27433,7 +27452,7 @@ static int writeOBJFullMtlDescription(char* mtlName, int type, int dataVal, char
             (float)(fRed * kd), (float)(fGreen * kd), (float)(fBlue * kd),
             (float)(fRed * ks), (float)(fGreen * ks), (float)(fBlue * ks),
             fullMtl, keString,
-            fullMtl, (alpha < 1.0f ? 4 : 2), // ray trace if transparent overall, e.g. water
+            fullMtl, ((alpha < 1.0f || adaptP3D) ? 4 : 2), // 透明或 P3D 适配时用 illum 4（2.0.8 模板即 4）
             (float)(alpha),
             (float)(1.0f - alpha),
             fullMtl, tfString);

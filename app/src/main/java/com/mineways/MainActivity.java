@@ -1788,6 +1788,7 @@ public class MainActivity extends AppCompatActivity {
         sb.append(";cost=").append(sp.getFloat("cost", 25f));
         sb.append(";units=").append(radioOrDefault(sp, "units", 0));          // 0=米（旧默认）
         sb.append(";physmat=").append(radioOrDefault(sp, "physmat", 1));      // 1=彩色砂岩（旧默认）
+        sb.append(";p3d=").append(sp.getBoolean("p3d", true) ? 1 : 0);        // 1=材质适配 Prisma3D（默认开）
         sb.append(";hollow=").append(sp.getBoolean("hollow", false) ? 1 : 0);
         sb.append(";superhollow=").append(sp.getBoolean("superhollow", false) ? 1 : 0);
         sb.append(";hollowthick=").append(sp.getFloat("hollowthick", 1000f));
@@ -1951,6 +1952,7 @@ public class MainActivity extends AppCompatActivity {
     private static final Object[][] OPT_BOOL_KEYS = {
             {"texrgb", true}, {"texa", true}, {"texrgba", true}, {"zup", false}, {"center", false},
             {"decimate", false}, {"borderfaces", true}, {"leaves", false}, {"septypes", true},
+            {"p3d", true},
             {"split", true}, {"groups", true}, {"indiv", false}, {"custommtl", true}, {"fam", true},
             {"fatten", false}, {"doubled", false}, {"mergeflat", false}, {"hollow", false},
             {"superhollow", false}, {"sealentrances", false}, {"sealtunnels", false},
@@ -2042,7 +2044,8 @@ public class MainActivity extends AppCompatActivity {
         android.widget.LinearLayout root = new android.widget.LinearLayout(this);
         root.setOrientation(android.widget.LinearLayout.VERTICAL);
         int pad = (int) (16 * getResources().getDisplayMetrics().density);
-        root.setPadding(pad, pad, pad, pad);
+        // 底部多留一段：面板很长，末尾选项不会被系统手势条/屏幕边缘遮住
+        root.setPadding(pad, pad, pad, (int) (32 * getResources().getDisplayMetrics().density));
         sv.addView(root);
 
         // 顶部快捷区：随时「全不选 / 全选 / 恢复默认」。配合每组里的「不选（用默认）」
@@ -2075,6 +2078,11 @@ public class MainActivity extends AppCompatActivity {
         final String[] mats = {"不选（用默认：整幅大图 3 张马赛克）", "不导出材质", "实体材质颜色",
                 "带颜色噪点纹理（大图）", "整幅大图（3 张马赛克）", "单独纹理（每个方块一张 PNG）"};
         root.addView(optRadioGroup("mat", new int[]{OPT_NONE, 0, 1, 2, 3, 4}, mats, 4, false, sp));
+
+        // 适配 Prisma3D（P3D）：只改导出材质参数、不动几何。参照 Prisma3D 2.0.8 自带的 OBJ 材质模板
+        // （illum 4 / Ka 0 0 0 / Kd 1 1 1 / 无 map_Ka / 无自发光 Ke），专治"模型导入 P3D 后过曝"。
+        root.addView(optSwitch("p3d",
+                "适配 Prisma3D（P3D）：Ka 0 / 无环境贴图 / 无自发光 / illum 4（防过曝）", true));
         root.addView(optSwitch("texrgb", "纹理输出 RGB", true));
         root.addView(optSwitch("texa", "纹理输出 Alpha", true));
         root.addView(optSwitch("texrgba", "纹理输出 RGBA", true));
@@ -2092,8 +2100,11 @@ public class MainActivity extends AppCompatActivity {
         root.addView(rowDir);
 
         root.addView(optTitle("朝向（3D 打印 / Blender 常用）"));
+        // 注意：这里原来横排（horizontal=true）。横排项数多时总宽会超出屏幕，
+        // 右侧按钮被裁掉、点不到（用户反馈"有几个选项根本选不了，溢出到屏幕外"），
+        // 除极短标签外一律竖排。
         root.addView(optRadioGroup("rotate", new int[]{OPT_NONE, 0, 90, 180, 270},
-                new String[]{"不选（用默认 0°）", "0°", "90°", "180°", "270°"}, 0, true, sp));
+                new String[]{"不选（用默认 0°）", "0°", "90°", "180°", "270°"}, 0, false, sp));
         root.addView(optSwitch("zup", "将 Z 设为向上方向（而不是 Y）", false));
         root.addView(optSwitch("center", "围绕原点居中模型", false));
 
@@ -2102,7 +2113,7 @@ public class MainActivity extends AppCompatActivity {
         root.addView(optTitle("维度（地图在哪一层）"));
         root.addView(optRadioGroup("dim", new int[]{OPT_NONE, 0, 1, 2},
                 new String[]{"不选（用默认：主世界）", "主世界（Overworld）",
-                        "下界（Nether）", "末地（The End）"}, 0, true, sp));
+                        "下界（Nether）", "末地（The End）"}, 0, false, sp));
 
         root.addView(optTitle("网格与分块"));
         root.addView(optSwitch("decimate", "简化网格（合并共面，面数大幅减少）", false));
@@ -2131,7 +2142,7 @@ public class MainActivity extends AppCompatActivity {
 
         root.addView(optTitle("3D 打印：单位与材料"));
         root.addView(optRadioGroup("units", new int[]{OPT_NONE, 0, 1, 2, 3},
-                new String[]{"不选（用默认：米）", "米", "厘米", "毫米", "英寸"}, 0, true, sp));
+                new String[]{"不选（用默认：米）", "米", "厘米", "毫米", "英寸"}, 0, false, sp));
         root.addView(optRadioGroup("physmat", new int[]{OPT_NONE, 0, 1, 13},
                 new String[]{"不选（用默认：彩色砂岩）", "白色强韧材料", "彩色砂岩（默认）", "自定义材料"},
                 1, false, sp));

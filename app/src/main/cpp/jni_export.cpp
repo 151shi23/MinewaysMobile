@@ -360,6 +360,11 @@ Java_com_mineways_MainActivity_exportWorld(JNIEnv* env, jobject,
     if (dim == 1)      opt.worldType |= HELL;
     else if (dim == 2) opt.worldType |= ENDER;
 
+    // 适配 Prisma3D（P3D）：只改导出材质参数，不动几何。参照 Prisma3D 2.0.8 自带的 OBJ 材质模板
+    // （illum 4 / Ka 0 0 0 / Kd 1 1 1 / 无 map_Ka / 无自发光 Ke），专治"模型导入 P3D 后过曝"。
+    // 默认开启（安卓端此前没有这个开关），面板上可关。
+    if (optInt(opts, "p3d", 1) != 0) opt.exportFlags |= EXPT_ADAPT_P3D;
+
     // 调试开关（属于 exportFlags，不进 efd）：用不同颜色显示浮动部件 / 焊接块
     if (optInt(opts, "dbggroups", 0)) opt.exportFlags |= EXPT_DEBUG_SHOW_GROUPS;
     if (optInt(opts, "dbgwelds", 0)) opt.exportFlags |= EXPT_DEBUG_SHOW_WELDS;
